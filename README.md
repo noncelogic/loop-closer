@@ -11,3 +11,18 @@ Documents in this folder:
 - `TECH-STACK.md` — the decided tech stack (2026-11-07)
 
 Project record: the canonical charter, spec, and plan for this project live in the meta-harness `projects/loop-closer/` folder; this repository is its code home.
+
+## Development
+
+Requires Node.js 24+ and Docker with the Compose plugin.
+
+```sh
+npm ci              # install (TypeScript toolchain only)
+npm run typecheck   # tsc over src/ and tests/
+npm run build       # emit dist/ — the loopcloser service skeleton
+npm test            # node:test suite, including the Compose replica test
+npm run replica:up  # one-command local replica: Postgres 17 + pgvector, `loopcloser` database
+```
+
+`compose.yaml` is the local replica of the deployment shape (TECH-STACK.md §2/§3). It binds
+Postgres to `127.0.0.1:${LOOPCLOSER_PG_PORT:-5432}`; the credentials in it are local-only.
