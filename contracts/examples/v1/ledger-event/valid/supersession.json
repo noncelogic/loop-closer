@@ -1,0 +1,14 @@
+{
+  "id": "lc_evt_4",
+  "at": "2026-11-07T15:30:00Z",
+  "actor": "agent:juno",
+  "event_type": "supersession",
+  "subject_ids": [
+    "lc_loop_bcba"
+  ],
+  "payload": {
+    "supersession_type": "fact_replacement",
+    "supersession_id": "lc_sup_1"
+  },
+  "idempotency_key": null
+}

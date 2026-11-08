@@ -1,0 +1,18 @@
+{
+  "id": "lc_sup_3",
+  "type": "same_as_merge",
+  "subject_ids": [
+    "lc_who_a",
+    "lc_who_b"
+  ],
+  "actor": "joe",
+  "reason": "Suzanne is covering",
+  "at": "2026-11-07T15:30:00Z",
+  "payload": {
+    "surviving_id": "lc_who_a",
+    "provenance": {
+      "decided_by": "joe",
+      "basis": "same email address, confirmed by Joe"
+    }
+  }
+}

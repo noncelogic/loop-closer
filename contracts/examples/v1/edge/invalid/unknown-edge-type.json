@@ -1,0 +1,13 @@
+{
+  "id": "lc_edge_1",
+  "from_id": "lc_when_reply",
+  "to_id": "lc_what_paper",
+  "edge_type": "likes",
+  "created_by": "agent:juno",
+  "created_at": "2026-11-07T15:30:00Z",
+  "evidence": {
+    "kind": "communication",
+    "id": "lc_comm_1"
+  },
+  "status": "active"
+}

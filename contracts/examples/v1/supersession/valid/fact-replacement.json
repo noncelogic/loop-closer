@@ -1,0 +1,13 @@
+{
+  "id": "lc_sup_1",
+  "type": "fact_replacement",
+  "subject_ids": [
+    "lc_who_brianna"
+  ],
+  "actor": "joe",
+  "reason": "Suzanne is covering",
+  "at": "2026-11-07T15:30:00Z",
+  "payload": {
+    "replacement_id": "lc_who_suzanne"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/authority.schema.json",
+  "title": "Authority (SPEC B2.6)",
+  "description": "Send authority in force for a loop. Default for every loop type is joe-approves-each.",
+  "type": "string",
+  "enum": ["autonomous", "joe-approves-each", "joe-approves-template"],
+  "default": "joe-approves-each"
+}

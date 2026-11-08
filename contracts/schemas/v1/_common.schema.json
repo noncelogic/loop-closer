@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json",
+  "title": "Shared definitions for Loop Closer v1 schemas",
+  "$defs": {
+    "id": {
+      "description": "Stable Loop Closer identifier (SPEC B2.1: lc_…).",
+      "type": "string",
+      "pattern": "^lc_[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullable_timestamp": { "type": ["string", "null"], "format": "date-time" },
+    "actor": {
+      "description": "Principal identity of the human or agent acting (per-agent API key principal).",
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "interval": {
+      "description": "Validity interval; to = null means still valid.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/timestamp" },
+        "to": { "$ref": "#/$defs/nullable_timestamp" }
+      }
+    },
+    "policy_ref": {
+      "description": "Policy cited by id + version (SPEC B4).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ranker_ref": {
+      "description": "Cross-reference to a Corpus Ranker object by ID and provenance pointer only (SPEC §4).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ranker_id", "provenance"],
+      "properties": {
+        "ranker_id": { "type": "string", "minLength": 1 },
+        "provenance": { "type": "string", "minLength": 1 }
+      }
+    },
+    "evidence": {
+      "description": "Pointer to the record justifying a change: a Communication, a gather event, or another ledger event.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["communication", "gather", "ledger_event"] },
+        "id": { "$ref": "#/$defs/id" }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "lc_sup_5",
+  "type": "objective_revision",
+  "subject_ids": [
+    "lc_what_mrr"
+  ],
+  "actor": "joe",
+  "reason": "Suzanne is covering",
+  "at": "2026-11-07T15:30:00Z",
+  "payload": {
+    "from_revision": 1,
+    "to_revision": 2,
+    "diff": {
+      "before": {
+        "metric": "mrr",
+        "value": 3000,
+        "unit": "USD"
+      },
+      "after": {
+        "metric": "mrr",
+        "value": 5000,
+        "unit": "USD"
+      }
+    },
+    "surfaced_to_who_id": "lc_who_joe"
+  }
+}

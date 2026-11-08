@@ -1,0 +1,27 @@
+{
+  "id": "lc_loop_bcba",
+  "name": "BCBA session scheduling",
+  "loop_type": "outreach",
+  "state": "closed_with_reason",
+  "accountable_who_id": "lc_who_brianna",
+  "member_node_ids": [
+    "lc_who_brianna",
+    "lc_who_hermes",
+    "lc_when_reply"
+  ],
+  "closing_when_id": "lc_when_reply",
+  "authority": "joe-approves-each",
+  "opened_at": "2026-11-05T12:00:00Z",
+  "closed_at": "2026-11-07T15:30:00Z",
+  "close_reason": null,
+  "policy_refs": {
+    "ageing": {
+      "id": "lc_policy_ageing_outreach",
+      "version": 1
+    },
+    "escalation": {
+      "id": "lc_policy_esc_outreach",
+      "version": 3
+    }
+  }
+}

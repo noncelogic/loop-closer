@@ -1,0 +1,17 @@
+{
+  "id": "lc_what_mrr",
+  "kind": "what",
+  "created_at": "2026-11-07T15:30:00Z",
+  "status": "active",
+  "attributes": {
+    "what_type": "objective",
+    "title": "Monthly revenue",
+    "target": {
+      "metric": "mrr",
+      "value": 5000,
+      "unit": "USD"
+    },
+    "current_value": 1200,
+    "revision": 2
+  }
+}

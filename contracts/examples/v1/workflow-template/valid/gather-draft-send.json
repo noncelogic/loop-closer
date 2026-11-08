@@ -1,0 +1,35 @@
+{
+  "id": "lc_tpl_chase",
+  "name": "Gather then chase",
+  "version": 2,
+  "steps": [
+    {
+      "primitive": "gather",
+      "actor_role": "chaser",
+      "params": {
+        "from": "what"
+      },
+      "on_failure": "retry"
+    },
+    {
+      "primitive": "draft",
+      "actor_role": "drafter",
+      "params": {},
+      "on_failure": "fail_run"
+    },
+    {
+      "primitive": "send",
+      "actor_role": "sender",
+      "params": {},
+      "on_failure": "escalate"
+    },
+    {
+      "primitive": "transition",
+      "actor_role": "system",
+      "params": {
+        "to_state": "chased"
+      },
+      "on_failure": "fail_run"
+    }
+  ]
+}

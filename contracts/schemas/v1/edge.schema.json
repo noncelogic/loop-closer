@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/edge.schema.json",
+  "title": "Edge (SPEC B2.2)",
+  "description": "Any node to any node, typed; causality is a first-class edge type. Edges are superseded by a new edge or a retraction record, never edited.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "from_id", "to_id", "edge_type", "created_by", "created_at", "evidence", "status"],
+  "properties": {
+    "id": { "$ref": "_common.schema.json#/$defs/id" },
+    "from_id": { "$ref": "_common.schema.json#/$defs/id" },
+    "to_id": { "$ref": "_common.schema.json#/$defs/id" },
+    "edge_type": { "$ref": "#/$defs/edge_type" },
+    "created_by": { "$ref": "_common.schema.json#/$defs/actor" },
+    "created_at": { "$ref": "_common.schema.json#/$defs/timestamp" },
+    "evidence": {
+      "oneOf": [{ "$ref": "_common.schema.json#/$defs/evidence" }, { "type": "null" }]
+    },
+    "status": { "enum": ["active", "superseded", "retracted"] }
+  },
+  "$defs": {
+    "causal_edge_type": { "enum": ["causes", "enables", "blocks"] },
+    "non_causal_edge_type": {
+      "enum": ["depends_on", "responds_to", "supersedes", "evidences", "owns", "is_waiting_on", "updates", "gathers_from"]
+    },
+    "edge_type": {
+      "anyOf": [{ "$ref": "#/$defs/causal_edge_type" }, { "$ref": "#/$defs/non_causal_edge_type" }]
+    }
+  }
+}
