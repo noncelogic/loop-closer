@@ -11,6 +11,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
+import { readinessPort } from "./readiness.ts";
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 
@@ -55,8 +56,10 @@ test("clean checkout builds the service skeleton", { timeout: 300_000 }, async (
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (chunk: string) => {
           buffered += chunk;
-          const match = /listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(buffered);
-          if (match) resolve(Number(match[1]));
+          // Wait for a complete newline-terminated readiness line; a chunk
+          // boundary inside the port number must not resolve a truncated port.
+          const ready = readinessPort(buffered);
+          if (ready !== undefined) resolve(ready);
         });
         child.once("exit", (code) => reject(new Error(`service exited early with code ${code}`)));
       });
