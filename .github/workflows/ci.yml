@@ -1,0 +1,33 @@
+name: ci
+
+# Plain `pull_request` only — never `pull_request_target` (docs/EXTERNAL-REVIEW.md §1).
+# Runs on GitHub-hosted runners, not the estate's self-hosted ones.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build
+      # Includes tests/foundation/local-replica.test.ts, which uses Docker Compose.
+      - run: npm test

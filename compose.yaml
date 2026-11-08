@@ -1,0 +1,32 @@
+# Local replica of the loopcloser deployment shape (TECH-STACK.md §2, §3, §10).
+# One command: `docker compose up --detach --wait` (or `npm run replica:up`).
+#
+# Production runs a CloudNativePG cluster with a dedicated `loopcloser`
+# database owned by a `loopcloser` role — never shared with Corpus Ranker.
+# This replica reproduces that shape on a single container, with pgvector.
+# Credentials here are local-only development values, not secrets.
+name: loopcloser
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: loopcloser
+      POSTGRES_PASSWORD: loopcloser
+      POSTGRES_DB: loopcloser
+    ports:
+      - "127.0.0.1:${LOOPCLOSER_PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: the initdb-phase server only listens on the socket, so a
+      # TCP probe is not ready until init scripts have finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U loopcloser -d loopcloser"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  pgdata:
