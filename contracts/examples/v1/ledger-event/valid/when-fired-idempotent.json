@@ -1,0 +1,13 @@
+{
+  "id": "lc_evt_2",
+  "at": "2026-11-07T15:30:00Z",
+  "actor": "sensor:gmail",
+  "event_type": "when_fired",
+  "subject_ids": [
+    "lc_when_reply"
+  ],
+  "payload": {
+    "fire_count": 1
+  },
+  "idempotency_key": "gmail:msg:18c2f"
+}

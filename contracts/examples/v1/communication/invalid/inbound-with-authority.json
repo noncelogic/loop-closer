@@ -1,0 +1,14 @@
+{
+  "id": "lc_comm_1",
+  "thread_id": "gmail:thread:abc",
+  "channel": "email",
+  "direction": "inbound",
+  "participant_who_ids": [
+    "lc_who_brianna"
+  ],
+  "at": "2026-11-07T15:30:00Z",
+  "body_pointer": "minio://loopcloser/originals/abababababababababababababababababababababababababababababababab",
+  "body_hash": "sha256:abababababababababababababababababababababababababababababababab",
+  "loop_id": "lc_loop_bcba",
+  "sent_under_authority": "joe-approves-each"
+}

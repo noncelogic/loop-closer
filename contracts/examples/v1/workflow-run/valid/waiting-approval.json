@@ -1,0 +1,31 @@
+{
+  "id": "lc_run_1",
+  "template": {
+    "id": "lc_tpl_chase",
+    "version": 2
+  },
+  "loop_id": "lc_loop_bcba",
+  "triggered_by": "lc_evt_2",
+  "state": "waiting_approval",
+  "step_log": [
+    {
+      "step_index": 0,
+      "outcome": "succeeded",
+      "ledger_event_ids": [
+        "lc_evt_5"
+      ]
+    },
+    {
+      "step_index": 1,
+      "outcome": "succeeded",
+      "ledger_event_ids": [
+        "lc_evt_6"
+      ]
+    },
+    {
+      "step_index": 2,
+      "outcome": "pending",
+      "ledger_event_ids": []
+    }
+  ]
+}

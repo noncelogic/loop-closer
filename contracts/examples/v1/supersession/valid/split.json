@@ -1,0 +1,21 @@
+{
+  "id": "lc_sup_4",
+  "type": "split",
+  "subject_ids": [
+    "lc_who_a"
+  ],
+  "actor": "joe",
+  "reason": "Suzanne is covering",
+  "at": "2026-11-07T15:30:00Z",
+  "payload": {
+    "result_ids": [
+      "lc_who_a",
+      "lc_who_b"
+    ],
+    "provenance": {
+      "decided_by": "joe",
+      "basis": "same email address, confirmed by Joe"
+    },
+    "reverses": "lc_sup_3"
+  }
+}

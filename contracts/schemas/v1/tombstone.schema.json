@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/tombstone.schema.json",
+  "title": "Tombstone (SPEC B2.9)",
+  "description": "Verified forgetting: content destroyed; hash, fact of existence and reason kept.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "subject_id", "subject_kind", "content_hash", "reason", "actor", "at"],
+  "properties": {
+    "id": { "$ref": "_common.schema.json#/$defs/id" },
+    "subject_id": { "$ref": "_common.schema.json#/$defs/id" },
+    "subject_kind": { "enum": ["node", "edge", "communication"] },
+    "content_hash": { "$ref": "_common.schema.json#/$defs/sha256" },
+    "reason": { "type": "string", "minLength": 1 },
+    "actor": { "$ref": "_common.schema.json#/$defs/actor" },
+    "at": { "$ref": "_common.schema.json#/$defs/timestamp" }
+  }
+}

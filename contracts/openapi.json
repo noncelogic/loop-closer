@@ -1,0 +1,1600 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Loop Closer API",
+    "version": "1.0.0",
+    "description": "SPEC B3 operation set for the loopcloser service. Domain objects are the SPEC B2 JSON Schemas under contracts/schemas/v1/, referenced by $id; tests/contracts/ keeps this document and those schemas in agreement. The MCP adapter maps tools 1:1 onto these operationIds."
+  },
+  "servers": [
+    {
+      "url": "/v1"
+    }
+  ],
+  "security": [
+    {
+      "agentKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "loops"
+    },
+    {
+      "name": "export"
+    }
+  ],
+  "paths": {
+    "/loops/propose": {
+      "post": {
+        "operationId": "propose_loop",
+        "summary": "Propose a loop (dedup-checked; sends nothing, obliges nobody)",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopWithEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "An open loop already covers the same Who + What/objective.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicateLoop"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeLoopRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/loops/{loop_id}/accept": {
+      "post": {
+        "operationId": "accept_loop",
+        "summary": "Accept a proposed loop: it opens and its Whens arm",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopWithEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptLoopRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "loop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        ]
+      }
+    },
+    "/loops/{loop_id}/reject": {
+      "post": {
+        "operationId": "reject_loop",
+        "summary": "Reject a proposed loop at intake (ledger event kept)",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopWithEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejectLoopRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "loop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        ]
+      }
+    },
+    "/loops/{loop_id}/transition": {
+      "post": {
+        "operationId": "transition",
+        "summary": "Validated state change + ledger event, atomically; double delivery applies once",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoopWithEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "loop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        ]
+      }
+    },
+    "/events/fire": {
+      "post": {
+        "operationId": "fire_event",
+        "summary": "Record a When firing and return what it sets in motion",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FireEventResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FireEventRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/loops": {
+      "get": {
+        "operationId": "open_loops",
+        "summary": "All non-closed loops with state, age, governing When and breach status",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenLoopsResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "parameters": [
+          {
+            "name": "accountable_who_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          },
+          {
+            "name": "loop_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json#/properties/loop_type"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "proposed",
+                "open",
+                "waiting",
+                "chased"
+              ]
+            }
+          },
+          {
+            "name": "breaching_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ]
+      }
+    },
+    "/what-fires-next": {
+      "get": {
+        "operationId": "what_fires_next",
+        "summary": "Exact causal-graph traversal: what a loop waits on, or what a When sets off",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhatFiresNextResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "parameters": [
+          {
+            "name": "loop_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            },
+            "description": "Exactly one of loop_id or when_id."
+          },
+          {
+            "name": "when_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            },
+            "description": "Exactly one of loop_id or when_id."
+          }
+        ]
+      }
+    },
+    "/supersessions": {
+      "post": {
+        "operationId": "supersede",
+        "summary": "Typed supersession (SPEC B2.8) with immediate effect on current state",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupersedeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupersedeRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/merge": {
+      "post": {
+        "operationId": "merge_nodes",
+        "summary": "Reversible same-as merge, ledger-recorded",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupersedeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeNodesRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/split": {
+      "post": {
+        "operationId": "split_nodes",
+        "summary": "Reversible split, ledger-recorded",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupersedeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SplitNodesRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/communications": {
+      "post": {
+        "operationId": "record_communication",
+        "summary": "Record a communication; may be cited as transition evidence",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "201": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Communication"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordCommunicationRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/loops/{loop_id}/send-requests": {
+      "post": {
+        "operationId": "request_send",
+        "summary": "Request a send; under joe-approves-each this only creates a pending approval",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "202": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendRequestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestSendRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "loop_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        ]
+      }
+    },
+    "/communications/{communication_id}/approve": {
+      "post": {
+        "operationId": "approve_send",
+        "summary": "Joe releases exactly this communication to the sender",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApproveSendResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveSendRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "communication_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health metrics for redesign \u2014 never a kill gate",
+        "tags": [
+          "loops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "P30D"
+            },
+            "description": "ISO 8601 duration."
+          }
+        ]
+      }
+    },
+    "/export": {
+      "get": {
+        "operationId": "export",
+        "summary": "The full portable bundle (SPEC B5)",
+        "tags": [
+          "export"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportBundle"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "agentKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "authorization",
+        "description": "Per-agent API key; scopes are checked per operation (TECH-STACK \u00a79)."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Request does not match the contract.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or unknown agent key.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Agent key lacks the scope for this operation, or the action exceeds the loop's authority.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Referenced object does not exist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Invalid state transition or conflicting request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Node": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/node.schema.json"
+      },
+      "Edge": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/edge.schema.json"
+      },
+      "Loop": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json"
+      },
+      "LedgerEvent": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/ledger-event.schema.json"
+      },
+      "Communication": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json"
+      },
+      "Authority": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/authority.schema.json"
+      },
+      "WorkflowTemplate": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/workflow-template.schema.json"
+      },
+      "WorkflowRun": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/workflow-run.schema.json"
+      },
+      "Supersession": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/supersession.schema.json"
+      },
+      "Tombstone": {
+        "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/tombstone.schema.json"
+      },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "details": {}
+        }
+      },
+      "LoopWithEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "loop",
+          "ledger_event"
+        ],
+        "properties": {
+          "loop": {
+            "$ref": "#/components/schemas/Loop"
+          },
+          "ledger_event": {
+            "$ref": "#/components/schemas/LedgerEvent"
+          }
+        }
+      },
+      "ProposedEdge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from_id",
+          "to_id",
+          "edge_type"
+        ],
+        "properties": {
+          "from_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "to_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "edge_type": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/edge.schema.json#/$defs/edge_type"
+          },
+          "evidence": {
+            "oneOf": [
+              {
+                "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/evidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ProposeLoopRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "loop_type",
+          "accountable_who_id",
+          "nodes",
+          "edges",
+          "actor",
+          "rationale"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "loop_type": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json#/properties/loop_type"
+          },
+          "accountable_who_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/Node"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "ref"
+                  ],
+                  "properties": {
+                    "ref": {
+                      "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+                    }
+                  }
+                }
+              ]
+            },
+            "minItems": 1,
+            "description": "New nodes, or references to existing nodes."
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProposedEdge"
+            }
+          },
+          "closing_when_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "DuplicateLoop": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "message",
+          "existing_loop_ids"
+        ],
+        "properties": {
+          "error": {
+            "const": "duplicate_loop"
+          },
+          "message": {
+            "type": "string"
+          },
+          "existing_loop_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            },
+            "minItems": 1
+          }
+        }
+      },
+      "AcceptLoopRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "acceptor"
+        ],
+        "properties": {
+          "acceptor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          }
+        }
+      },
+      "RejectLoopRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "reason"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "TransitionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "to_state",
+          "actor",
+          "evidence",
+          "idempotency_key"
+        ],
+        "properties": {
+          "to_state": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json#/$defs/loop_state"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          },
+          "evidence": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/evidence"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Same key delivered twice applies once."
+          },
+          "close_reason": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json#/$defs/close_reason"
+          }
+        }
+      },
+      "FireEventRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "when_id",
+              "idempotency_key"
+            ],
+            "properties": {
+              "when_id": {
+                "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Same key delivered twice applies once."
+              },
+              "payload": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "event_type",
+              "source",
+              "payload",
+              "idempotency_key"
+            ],
+            "properties": {
+              "event_type": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "payload": {
+                "type": "object"
+              },
+              "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Same key delivered twice applies once."
+              }
+            }
+          }
+        ]
+      },
+      "FireEventResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ledger_event",
+          "applied",
+          "loop_ids",
+          "workflow_runs"
+        ],
+        "properties": {
+          "ledger_event": {
+            "$ref": "#/components/schemas/LedgerEvent"
+          },
+          "applied": {
+            "type": "boolean",
+            "description": "false when the idempotency key was already applied."
+          },
+          "loop_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          },
+          "workflow_runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRun"
+            }
+          }
+        }
+      },
+      "OpenLoop": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "loop",
+          "age_seconds",
+          "governing_when_ids",
+          "breaching"
+        ],
+        "properties": {
+          "loop": {
+            "$ref": "#/components/schemas/Loop"
+          },
+          "age_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "governing_when_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          },
+          "breaching": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OpenLoopsResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "loops"
+        ],
+        "properties": {
+          "loops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpenLoop"
+            }
+          }
+        }
+      },
+      "FiringEffect": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "when_id",
+          "loop_id"
+        ],
+        "properties": {
+          "when_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "loop_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "next_state": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json#/$defs/loop_state"
+          },
+          "workflow_template": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/policy_ref"
+          },
+          "via_edge_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            }
+          }
+        }
+      },
+      "WhatFiresNextResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "effects"
+        ],
+        "properties": {
+          "effects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FiringEffect"
+            }
+          }
+        }
+      },
+      "SupersedeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "subject_ids",
+          "payload",
+          "actor",
+          "reason"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/supersession.schema.json#/$defs/supersession_type"
+          },
+          "subject_ids": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/supersession.schema.json#/properties/subject_ids"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "SupersedeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "supersession",
+          "ledger_event"
+        ],
+        "properties": {
+          "supersession": {
+            "$ref": "#/components/schemas/Supersession"
+          },
+          "ledger_event": {
+            "$ref": "#/components/schemas/LedgerEvent"
+          }
+        }
+      },
+      "MergeNodesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_ids",
+          "surviving_id",
+          "provenance",
+          "actor"
+        ],
+        "properties": {
+          "node_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+            },
+            "minItems": 2,
+            "uniqueItems": true
+          },
+          "surviving_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "provenance": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/supersession.schema.json#/$defs/provenance"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          }
+        }
+      },
+      "SplitNodesRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "provenance",
+          "actor"
+        ],
+        "properties": {
+          "node_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "reverses": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "provenance": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/supersession.schema.json#/$defs/provenance"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          },
+          "into": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "description": "New nodes to split out; omitted when reversing a merge."
+          }
+        }
+      },
+      "RecordCommunicationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "thread_id",
+          "channel",
+          "direction",
+          "participant_who_ids",
+          "at",
+          "body_pointer",
+          "body_hash",
+          "loop_id"
+        ],
+        "properties": {
+          "thread_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/thread_id"
+          },
+          "channel": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/channel"
+          },
+          "direction": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/direction"
+          },
+          "participant_who_ids": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/participant_who_ids"
+          },
+          "at": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/at"
+          },
+          "body_pointer": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/body_pointer"
+          },
+          "body_hash": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/body_hash"
+          },
+          "loop_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/communication.schema.json#/properties/loop_id"
+          }
+        }
+      },
+      "RequestSendRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "communication_id",
+          "actor"
+        ],
+        "properties": {
+          "communication_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "actor": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          }
+        }
+      },
+      "SendRequestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "communication_id",
+          "authority",
+          "status"
+        ],
+        "properties": {
+          "communication_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "authority": {
+            "$ref": "#/components/schemas/Authority"
+          },
+          "status": {
+            "enum": [
+              "pending_approval",
+              "enqueued"
+            ],
+            "description": "joe-approves-each always yields pending_approval; nothing is sent."
+          }
+        }
+      },
+      "ApproveSendRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approver"
+        ],
+        "properties": {
+          "approver": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/actor"
+          }
+        }
+      },
+      "ApproveSendResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "communication_id",
+          "status",
+          "ledger_event"
+        ],
+        "properties": {
+          "communication_id": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/id"
+          },
+          "status": {
+            "const": "released"
+          },
+          "ledger_event": {
+            "$ref": "#/components/schemas/LedgerEvent"
+          }
+        }
+      },
+      "HealthResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "window",
+          "breach_pct",
+          "manual_correction_count",
+          "median_open_age_seconds",
+          "abandonment_count"
+        ],
+        "properties": {
+          "window": {
+            "type": "string"
+          },
+          "snapshot_at": {
+            "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/timestamp"
+          },
+          "breach_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "manual_correction_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "median_open_age_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "abandonment_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ExportBundle": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "manifest",
+          "nodes",
+          "edges",
+          "loops",
+          "ledger",
+          "communications",
+          "policies",
+          "templates",
+          "tombstones"
+        ],
+        "properties": {
+          "manifest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "format",
+              "schema_version",
+              "exported_at",
+              "scope"
+            ],
+            "properties": {
+              "format": {
+                "const": "loopcloser-export"
+              },
+              "schema_version": {
+                "const": "v1"
+              },
+              "exported_at": {
+                "$ref": "https://loopcloser.noncelogic.invalid/schemas/v1/_common.schema.json#/$defs/timestamp"
+              },
+              "scope": {
+                "type": "string"
+              }
+            }
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            }
+          },
+          "loops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Loop"
+            }
+          },
+          "ledger": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LedgerEvent"
+            },
+            "description": "Complete and in order; replaying it reproduces current state."
+          },
+          "communications": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Communication"
+            }
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Versioned policy records (SPEC B4)."
+          },
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowTemplate"
+            }
+          },
+          "tombstones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tombstone"
+            }
+          }
+        }
+      }
+    }
+  }
+}

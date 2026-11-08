@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/loop.schema.json",
+  "title": "Loop (SPEC B2.3)",
+  "description": "A named subgraph plus a state record. State changes only via the transition operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "name", "loop_type", "state", "accountable_who_id", "member_node_ids",
+    "closing_when_id", "authority", "opened_at", "closed_at", "close_reason", "policy_refs"
+  ],
+  "properties": {
+    "id": { "$ref": "_common.schema.json#/$defs/id" },
+    "name": { "type": "string", "minLength": 1 },
+    "loop_type": {
+      "description": "Loop types are data (publishing, outreach, deploy-watch, objective-tracking, grant, errand, …).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "state": { "$ref": "#/$defs/loop_state" },
+    "accountable_who_id": { "$ref": "_common.schema.json#/$defs/id" },
+    "member_node_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "_common.schema.json#/$defs/id" }
+    },
+    "closing_when_id": {
+      "oneOf": [{ "$ref": "_common.schema.json#/$defs/id" }, { "type": "null" }]
+    },
+    "authority": { "$ref": "authority.schema.json" },
+    "opened_at": { "$ref": "_common.schema.json#/$defs/nullable_timestamp" },
+    "closed_at": { "$ref": "_common.schema.json#/$defs/nullable_timestamp" },
+    "close_reason": {
+      "oneOf": [{ "$ref": "#/$defs/close_reason" }, { "type": "null" }]
+    },
+    "policy_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ageing", "escalation"],
+      "properties": {
+        "ageing": { "$ref": "_common.schema.json#/$defs/policy_ref" },
+        "escalation": { "$ref": "_common.schema.json#/$defs/policy_ref" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "closed_with_reason" } }, "required": ["state"] },
+      "then": {
+        "properties": {
+          "close_reason": { "$ref": "#/$defs/close_reason" },
+          "closed_at": { "$ref": "_common.schema.json#/$defs/timestamp" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "closed" } }, "required": ["state"] },
+      "then": {
+        "properties": {
+          "close_reason": { "type": "null" },
+          "closed_at": { "$ref": "_common.schema.json#/$defs/timestamp" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["proposed", "open", "waiting", "chased"] } }, "required": ["state"] },
+      "then": { "properties": { "close_reason": { "type": "null" }, "closed_at": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "proposed" } }, "required": ["state"] },
+      "then": { "properties": { "opened_at": { "type": "null" } } }
+    }
+  ],
+  "$defs": {
+    "loop_state": { "enum": ["proposed", "open", "waiting", "chased", "closed", "closed_with_reason"] },
+    "close_reason": {
+      "description": "rejected = closed at intake by reject_loop.",
+      "enum": ["abandoned", "superseded", "no-longer-applies", "rejected"]
+    }
+  }
+}

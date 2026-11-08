@@ -1,0 +1,13 @@
+{
+  "id": "lc_evt_3",
+  "at": "2026-11-07T15:30:00Z",
+  "actor": "joe",
+  "event_type": "manual_correction",
+  "subject_ids": [
+    "lc_loop_bcba"
+  ],
+  "payload": {
+    "note": "was already closed"
+  },
+  "idempotency_key": null
+}

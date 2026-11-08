@@ -1,0 +1,13 @@
+{
+  "id": "lc_tpl_chase",
+  "name": "Gather then chase",
+  "version": 2,
+  "steps": [
+    {
+      "primitive": "synthesize",
+      "actor_role": "system",
+      "params": {},
+      "on_failure": "skip"
+    }
+  ]
+}

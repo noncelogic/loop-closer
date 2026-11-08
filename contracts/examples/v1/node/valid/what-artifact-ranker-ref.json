@@ -1,0 +1,14 @@
+{
+  "id": "lc_what_paper",
+  "kind": "what",
+  "created_at": "2026-11-07T15:30:00Z",
+  "status": "active",
+  "attributes": {
+    "what_type": "artifact",
+    "title": "The paper",
+    "ranker_ref": {
+      "ranker_id": "cr_item_42",
+      "provenance": "ranker:view/top-n/2026-11-07"
+    }
+  }
+}

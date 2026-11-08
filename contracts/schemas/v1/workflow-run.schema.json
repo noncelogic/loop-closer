@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loopcloser.noncelogic.invalid/schemas/v1/workflow-run.schema.json",
+  "title": "Workflow run (SPEC B2.7)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "template", "loop_id", "triggered_by", "state", "step_log"],
+  "properties": {
+    "id": { "$ref": "_common.schema.json#/$defs/id" },
+    "template": { "$ref": "_common.schema.json#/$defs/policy_ref", "description": "Template id + version." },
+    "loop_id": { "$ref": "_common.schema.json#/$defs/id" },
+    "triggered_by": { "$ref": "_common.schema.json#/$defs/id", "description": "Ledger event id — usually a When firing." },
+    "state": { "enum": ["running", "waiting_approval", "done", "failed"] },
+    "step_log": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step_index", "outcome", "ledger_event_ids"],
+        "properties": {
+          "step_index": { "type": "integer", "minimum": 0 },
+          "outcome": { "enum": ["pending", "succeeded", "failed", "skipped"] },
+          "ledger_event_ids": { "type": "array", "items": { "$ref": "_common.schema.json#/$defs/id" } },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  }
+}
