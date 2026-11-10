@@ -63,7 +63,7 @@ const CLOSED: ReadonlySet<LoopState> = new Set(["closed", "closed_with_reason"])
  * Valid manual transitions. `proposed` leaves only via accept_loop / reject_loop;
  * closed states are terminal (re-opening is a new loop or a manual_correction).
  */
-const TRANSITIONS: Readonly<Record<LoopState, readonly LoopState[]>> = {
+export const LOOP_TRANSITIONS: Readonly<Record<LoopState, readonly LoopState[]>> = {
   proposed: [],
   open: ["waiting", "chased", "closed", "closed_with_reason"],
   waiting: ["open", "chased", "closed", "closed_with_reason"],
@@ -322,7 +322,7 @@ export class Kernel {
       for (const effect of effects) {
         if (!effect.next_state) continue;
         const loop = this.#loop(tx, effect.loop_id);
-        if (loop.state === effect.next_state || !TRANSITIONS[loop.state].includes(effect.next_state)) continue;
+        if (loop.state === effect.next_state || !LOOP_TRANSITIONS[loop.state].includes(effect.next_state)) continue;
         this.#move(tx, loop, effect.next_state, { actor, evidence, idempotency_key: null, close_reason: null });
       }
       return { ledger_event, applied: true, loop_ids: loopIds, workflow_runs: [] };
@@ -428,7 +428,7 @@ export class Kernel {
     to: LoopState,
     how: { actor: string; evidence: { kind: "communication" | "gather" | "ledger_event"; id: string }; idempotency_key: string | null; close_reason: Loop["close_reason"] },
   ): LoopWithEvent {
-    if (!TRANSITIONS[loop.state].includes(to))
+    if (!LOOP_TRANSITIONS[loop.state].includes(to))
       throw new KernelError("conflict", `loop ${loop.id} cannot move from ${loop.state} to ${to}`);
     const at = this.#at();
     const next: Loop = {

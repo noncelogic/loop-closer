@@ -27,6 +27,11 @@ npm run replica:up  # one-command local replica: Postgres 17 + pgvector, `loopcl
 `compose.yaml` is the local replica of the deployment shape (TECH-STACK.md §2/§3). It binds
 Postgres to `127.0.0.1:${LOOPCLOSER_PG_PORT:-5432}`; the credentials in it are local-only.
 
+The loop model's Postgres schema is versioned SQL in `db/migrations/` (`NNNN_name.sql`, applied
+once each, in order, recorded in `schema_migrations`). The service connects as the
+`loopcloser_app` role, which can append to and read `ledger_events` but cannot update or delete
+them. `tests/schema/` proves the schema on a fresh Compose replica.
+
 ## Deployment
 
 `Dockerfile` builds the service image; CI (job `image`) publishes it to
