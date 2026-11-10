@@ -101,6 +101,16 @@ export class Sensor {
     });
   }
 
+  /** Fires one specific When (e.g. a due calendar When) as this sensor. */
+  fireWhen(input: { when_id: string; idempotency_key: string; payload?: Record<string, unknown> }): Promise<FireEventResult> {
+    return this.#kernel.fireEvent({
+      when_id: input.when_id,
+      idempotency_key: input.idempotency_key,
+      payload: input.payload ?? {},
+      actor: this.actor,
+    });
+  }
+
   /** Records that the sensor is alive (it ran, whether or not it saw a change). */
   heartbeat(): Promise<FireEventResult> {
     return this.#kernel.fireEvent({

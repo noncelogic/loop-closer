@@ -1,0 +1,58 @@
+# The per-minute timer tick (TECH-STACK.md §6). Shipped suspended: the tick
+# entrypoint (dist/tick.js, LC-M2-T1) is enabled at rollout by setting
+# `suspend: false` in the estate overlay. Missed ticks self-heal, so Forbid
+# overlap rather than queue it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loopcloser-tick
+  labels:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: tick
+spec:
+  schedule: "* * * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 50
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 55
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: loopcloser
+            app.kubernetes.io/component: tick
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: tick
+              image: ghcr.io/noncelogic/loop-closer
+              command: ["node", "dist/tick.js"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: loopcloser-db-app
+                      key: uri
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
