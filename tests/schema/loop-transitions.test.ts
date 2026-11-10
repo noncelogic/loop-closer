@@ -44,6 +44,19 @@ test("a loop is born proposed", { timeout: 60_000 }, () => {
   assert.match(err, /must be created in state proposed/);
 });
 
+test("a temporary table cannot shadow the recorded state machine", { timeout: 60_000 }, () => {
+  // The app role may create temp tables, and pg_temp is searched first for
+  // unqualified names; the trigger must still read public.loop_state_transitions.
+  const err = db.psqlError(
+    `CREATE TEMP TABLE loop_state_transitions (from_state text, to_state text, via text);
+     INSERT INTO loop_state_transitions VALUES ('proposed', 'waiting', 'transition');
+     ${setState("waiting")};`,
+    APP,
+  );
+  assert.match(err, /invalid loop transition proposed -> waiting/);
+  assert.equal(db.psql("select state from loops where id = 'lc_loop_1'"), "proposed");
+});
+
 test("loop transitions follow the recorded state machine", { timeout: 60_000 }, () => {
   // proposed may not skip intake.
   assert.match(db.psqlError(setState("waiting"), APP), /invalid loop transition proposed -> waiting/);

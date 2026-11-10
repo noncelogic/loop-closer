@@ -148,7 +148,10 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  SELECT via INTO how FROM loop_state_transitions
+  -- Schema-qualified: an unqualified name would resolve through the caller's
+  -- search_path, where pg_temp comes first, letting the app role shadow the
+  -- recorded state machine with a temporary table.
+  SELECT via INTO how FROM public.loop_state_transitions
    WHERE from_state = OLD.state AND to_state = NEW.state;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'invalid loop transition % -> % for loop %', OLD.state, NEW.state, OLD.id
