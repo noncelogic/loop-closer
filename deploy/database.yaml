@@ -1,0 +1,30 @@
+# Dedicated CloudNativePG cluster for Loop Closer (TECH-STACK.md §2): its own
+# `loopcloser` database owned by the `loopcloser` role, never shared with
+# Corpus Ranker. Reconciled by the estate's existing operator in pg-system; no
+# operator is installed here. CNPG publishes the app connection details in the
+# `loopcloser-db-app` secret (key `uri` is the DATABASE_URL).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: loopcloser-db
+spec:
+  instances: 2
+  # "standard" operand images ship pgvector (TECH-STACK.md §3), matching the
+  # compose.yaml replica.
+  imageName: ghcr.io/cloudnative-pg/postgresql:17-standard-bookworm
+  primaryUpdateStrategy: unsupervised
+  bootstrap:
+    initdb:
+      database: loopcloser
+      owner: loopcloser
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector;
+  storage:
+    size: 20Gi
+    storageClass: managed-csi-premium
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
