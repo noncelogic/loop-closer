@@ -1,0 +1,25 @@
+# loopcloser on aks-obs-01 (TECH-STACK.md §10). Manifests only: rollout is
+# estate-side GitOps work; nothing in this repo's pipeline applies these.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loop-closer
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: loopcloser
+      app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - namespace.yaml
+  - database.yaml
+  - external-secrets.yaml
+  - deployment.yaml
+  - service.yaml
+  - tick-cronjob.yaml
+
+# Published by .github/workflows/ci.yml (job `image`). The estate overlay pins
+# a digest or sha-<commit> tag at rollout.
+images:
+  - name: ghcr.io/noncelogic/loop-closer
+    newTag: main

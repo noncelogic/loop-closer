@@ -1,0 +1,18 @@
+# In-cluster only: no Ingress, no LoadBalancer. Access follows the estate's
+# internal pattern.
+apiVersion: v1
+kind: Service
+metadata:
+  name: loopcloser
+  labels:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
