@@ -79,7 +79,7 @@ export async function runTick(store: TimerStore, opts: TickOptions): Promise<Tic
         payload: { scheduled_for: scheduledFor, next_fire_at: next, missed_occurrences: advance.missed },
         idempotency_key: `calendar:${when.id}:${scheduledFor}`,
       });
-      await tx.setNextFireAt(when.id, next);
+      await tx.setNextFireAt(when.id, next, advance.schedule);
       fired.push({ when_id: when.id, event_id: eventId, scheduled_for: scheduledFor, next_fire_at: next, missed_occurrences: advance.missed });
     }
 

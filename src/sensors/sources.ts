@@ -106,7 +106,8 @@ export class CalendarSource {
       await this.#store.transaction((tx) => {
         const current = tx.getNode(when.id);
         if (current?.attributes["next_fire_at"] !== scheduledFor) return;
-        tx.putNode({ ...current, attributes: { ...current.attributes, next_fire_at: next } });
+        const pinned = advance.schedule ? { schedule: advance.schedule } : {};
+        tx.putNode({ ...current, attributes: { ...current.attributes, next_fire_at: next, ...pinned } });
       });
       fired.push({
         when_id: when.id,

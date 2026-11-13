@@ -10,8 +10,10 @@
 // `dtstart` read in the When's timezone — not from the previous firing
 // instant: the time of day (and MONTHLY's day of month) always come from the
 // anchor, so an occurrence pushed forward by a DST gap (02:30 -> 03:30) does
-// not shift every later one. Without a `dtstart` the fired occurrence is the
-// only anchor available.
+// not shift every later one. A rule without a `dtstart` is anchored on its
+// first firing: nextFireAt returns the schedule with that `dtstart` pinned
+// (`schedule`), and callers persist it, so later firings never re-derive the
+// anchor from a DST-shifted firing instant.
 
 export type CalendarSchedule = { readonly at: string } | { readonly rrule: string; readonly dtstart?: string };
 
@@ -20,6 +22,12 @@ export interface NextFire {
   readonly next: Date | null;
   /** Occurrences after the one being fired that were already due at `now` (missed ticks) and are skipped. */
   readonly missed: number;
+  /**
+   * The schedule with its recurrence anchor pinned: a rule fired without a
+   * `dtstart` gets the fired occurrence as its `dtstart`. Present only when it
+   * differs from the input; callers must persist it alongside `next`.
+   */
+  readonly schedule?: CalendarSchedule;
 }
 
 export class ScheduleError extends Error {
@@ -185,7 +193,8 @@ export function nextFireAt(schedule: CalendarSchedule, timeZone: string, fired: 
   formatter(timeZone); // validate the timezone even for one-off schedules
   if ("at" in schedule) return { next: null, missed: 0 };
   const rule = parseRrule(schedule.rrule);
-  const anchor = toLocal(schedule.dtstart !== undefined ? new Date(schedule.dtstart) : fired, timeZone);
+  const pinned = schedule.dtstart === undefined ? { rrule: schedule.rrule, dtstart: fired.toISOString() } : undefined;
+  const anchor = toLocal(new Date(pinned?.dtstart ?? schedule.dtstart!), timeZone);
   let missed = 0;
   let next = step(rule, fired, timeZone, anchor);
   if (rule.freq === "MINUTELY" || rule.freq === "HOURLY") {
@@ -203,8 +212,8 @@ export function nextFireAt(schedule: CalendarSchedule, timeZone: string, fired: 
       next = step(rule, next, timeZone, anchor);
     }
   }
-  if (rule.until && next.getTime() > rule.until.getTime()) return { next: null, missed };
-  return { next, missed };
+  const result = rule.until && next.getTime() > rule.until.getTime() ? { next: null, missed } : { next, missed };
+  return pinned ? { ...result, schedule: pinned } : result;
 }
 
 export function parseSchedule(value: unknown): CalendarSchedule {

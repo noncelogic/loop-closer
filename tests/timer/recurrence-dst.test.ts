@@ -87,3 +87,19 @@ test("a daily 01:30 America/New_York When fires exactly once on the fall-back da
   // One ledger event per firing: the repeated 01:30 hour never re-fires.
   assert.equal(store.snapshot().ledger.length, 3);
 });
+
+test("a daily 02:30 America/New_York When without a dtstart keeps 02:30 across the spring-forward day", async () => {
+  // No dtstart: the first firing (Sat 02:30 EST) is pinned as the anchor, so the
+  // Sunday 03:30 EDT firing does not become the anchor for Monday onwards.
+  const store = storeWith({ rrule: "FREQ=DAILY" }, "2026-03-07T07:30:00Z");
+  const fired = await tickThrough(store, "2026-03-07T05:00:00Z", "2026-03-11T05:00:00Z", 5);
+  assert.deepEqual(fired.map(localTime), [
+    "2026-03-07, 02:30 EST",
+    "2026-03-08, 03:30 EDT",
+    "2026-03-09, 02:30 EDT",
+    "2026-03-10, 02:30 EDT",
+  ]);
+  const node = store.snapshot().nodes[0]!;
+  assert.deepEqual(node.attributes["schedule"], { rrule: "FREQ=DAILY", dtstart: "2026-03-07T07:30:00.000Z" });
+  assert.equal(node.attributes["next_fire_at"], "2026-03-11T06:30:00.000Z");
+});
