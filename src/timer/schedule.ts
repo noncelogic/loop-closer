@@ -5,8 +5,15 @@
 // Supported RRULE subset (RFC 5545): FREQ=MINUTELY|HOURLY|DAILY|WEEKLY|MONTHLY,
 // INTERVAL, BYDAY (WEEKLY only, INTERVAL=1), UNTIL. Anything else is rejected
 // rather than silently mis-scheduled.
+//
+// DAILY/WEEKLY/MONTHLY occurrences are computed from the rule's anchor — its
+// `dtstart` read in the When's timezone — not from the previous firing
+// instant: the time of day (and MONTHLY's day of month) always come from the
+// anchor, so an occurrence pushed forward by a DST gap (02:30 -> 03:30) does
+// not shift every later one. Without a `dtstart` the fired occurrence is the
+// only anchor available.
 
-export type CalendarSchedule = { readonly at: string } | { readonly rrule: string };
+export type CalendarSchedule = { readonly at: string } | { readonly rrule: string; readonly dtstart?: string };
 
 export interface NextFire {
   /** Next occurrence strictly after `now`; null when the schedule is exhausted. */
@@ -133,16 +140,21 @@ function weekday(l: Local): number {
   return new Date(Date.UTC(l.y, l.mo - 1, l.d)).getUTCDay();
 }
 
-function step(rule: Rule, prev: Date, timeZone: string, anchorDay: number): Date {
+/** `prev`'s local calendar date carrying the anchor's wall-clock time of day. */
+function anchoredLocal(prev: Date, timeZone: string, anchor: Local): Local {
+  return { ...toLocal(prev, timeZone), h: anchor.h, mi: anchor.mi, s: anchor.s };
+}
+
+function step(rule: Rule, prev: Date, timeZone: string, anchor: Local): Date {
   switch (rule.freq) {
     case "MINUTELY":
       return new Date(prev.getTime() + rule.interval * 60_000);
     case "HOURLY":
       return new Date(prev.getTime() + rule.interval * 3_600_000);
     case "DAILY":
-      return fromLocal(shiftLocal(toLocal(prev, timeZone), rule.interval), timeZone);
+      return fromLocal(shiftLocal(anchoredLocal(prev, timeZone, anchor), rule.interval), timeZone);
     case "WEEKLY": {
-      const local = toLocal(prev, timeZone);
+      const local = anchoredLocal(prev, timeZone, anchor);
       if (!rule.byDay) return fromLocal(shiftLocal(local, 7 * rule.interval), timeZone);
       for (let i = 1; i <= 7; i++) {
         const cand = shiftLocal(local, i);
@@ -152,7 +164,8 @@ function step(rule: Rule, prev: Date, timeZone: string, anchorDay: number): Date
     }
     case "MONTHLY": {
       // Months lacking the anchor day are skipped (RFC 5545), so walk from the anchor.
-      const local = toLocal(prev, timeZone);
+      const anchorDay = anchor.d;
+      const local = anchoredLocal(prev, timeZone, anchor);
       for (let k = rule.interval; k <= rule.interval * 48; k += rule.interval) {
         const cand = shiftLocal({ ...local, d: 1 }, 0, k);
         const daysInMonth = new Date(Date.UTC(cand.y, cand.mo, 0)).getUTCDate();
@@ -172,9 +185,9 @@ export function nextFireAt(schedule: CalendarSchedule, timeZone: string, fired: 
   formatter(timeZone); // validate the timezone even for one-off schedules
   if ("at" in schedule) return { next: null, missed: 0 };
   const rule = parseRrule(schedule.rrule);
-  const anchorDay = toLocal(fired, timeZone).d;
+  const anchor = toLocal(schedule.dtstart !== undefined ? new Date(schedule.dtstart) : fired, timeZone);
   let missed = 0;
-  let next = step(rule, fired, timeZone, anchorDay);
+  let next = step(rule, fired, timeZone, anchor);
   if (rule.freq === "MINUTELY" || rule.freq === "HOURLY") {
     // Fixed-length steps: skip the backlog arithmetically rather than one by one.
     const len = next.getTime() - fired.getTime();
@@ -187,7 +200,7 @@ export function nextFireAt(schedule: CalendarSchedule, timeZone: string, fired: 
     for (let i = 0; next.getTime() <= now.getTime(); i++) {
       if (i >= MAX_STEPS) throw new ScheduleError("schedule backlog too large to advance");
       missed++;
-      next = step(rule, next, timeZone, anchorDay);
+      next = step(rule, next, timeZone, anchor);
     }
   }
   if (rule.until && next.getTime() > rule.until.getTime()) return { next: null, missed };
@@ -198,7 +211,11 @@ export function parseSchedule(value: unknown): CalendarSchedule {
   if (typeof value === "object" && value !== null) {
     const v = value as Record<string, unknown>;
     if (typeof v["at"] === "string" && !Number.isNaN(Date.parse(v["at"]))) return { at: v["at"] };
-    if (typeof v["rrule"] === "string") return { rrule: v["rrule"] };
+    if (typeof v["rrule"] === "string") {
+      const dtstart = v["dtstart"];
+      if (dtstart === undefined) return { rrule: v["rrule"] };
+      if (typeof dtstart === "string" && !Number.isNaN(Date.parse(dtstart))) return { rrule: v["rrule"], dtstart };
+    }
   }
   throw new ScheduleError(`invalid calendar schedule ${JSON.stringify(value)}`);
 }
