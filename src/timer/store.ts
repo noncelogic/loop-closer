@@ -63,7 +63,8 @@ export interface TimerTx {
   claimDueCalendarWhens(now: Date): Promise<DueCalendarWhen[]>;
   /** Append-only; rejects a duplicate idempotency key. */
   appendLedgerEvent(event: LedgerEvent): Promise<void>;
-  setNextFireAt(whenId: string, nextFireAt: string | null): Promise<void>;
+  /** Advance next_fire_at; when `schedule` is given, also replace the When's schedule (its pinned recurrence anchor). */
+  setNextFireAt(whenId: string, nextFireAt: string | null, schedule?: unknown): Promise<void>;
   /** Non-closed loops with the ageing policy version each one cites (null if that version is missing). */
   listOpenLoopsForAgeing(): Promise<Array<{ loop: LoopAgeingRow; policy: AgeingPolicy | null }>>;
 }
@@ -138,10 +139,11 @@ function memoryTx(state: TimerState): TimerTx {
       }
       state.ledger.push(structuredClone(event));
     },
-    async setNextFireAt(whenId, nextFireAt) {
+    async setNextFireAt(whenId, nextFireAt, schedule) {
       const node = state.nodes.find((n) => n.id === whenId);
       if (!node) throw new Error(`no When ${whenId}`);
       node.attributes["next_fire_at"] = nextFireAt;
+      if (schedule !== undefined) node.attributes["schedule"] = structuredClone(schedule);
     },
     async listOpenLoopsForAgeing() {
       return state.loops
