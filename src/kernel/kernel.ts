@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createValidator, SCHEMA_ID_BASE } from "../contracts/index.ts";
+import { anchorCalendarWhen } from "../timer/schedule.ts";
 import type { GraphStore, GraphTx } from "./store.ts";
 import type {
   AcceptLoopInput,
@@ -110,7 +111,9 @@ export class Kernel {
       const at = this.#at();
       const members = new Map<string, Node>();
       const created: Node[] = [];
-      for (const entry of input.nodes) {
+      for (const proposed of input.nodes) {
+        // A recurring calendar When is stored with its recurrence anchor (LC-M2-T1c).
+        const entry = isRef(proposed) || proposed.kind !== "when" ? proposed : { ...proposed, attributes: anchorCalendarWhen(proposed.attributes) };
         if (isRef(entry)) {
           const existing = tx.getNode(entry.ref);
           if (!existing) throw new KernelError("not_found", `node ${entry.ref} does not exist`);
