@@ -10,10 +10,11 @@
 // `dtstart` read in the When's timezone — not from the previous firing
 // instant: the time of day (and MONTHLY's day of month) always come from the
 // anchor, so an occurrence pushed forward by a DST gap (02:30 -> 03:30) does
-// not shift every later one. A rule without a `dtstart` is anchored on its
-// first firing: nextFireAt returns the schedule with that `dtstart` pinned
-// (`schedule`), and callers persist it, so later firings never re-derive the
-// anchor from a DST-shifted firing instant.
+// not shift every later one. A rule written without a `dtstart` is anchored
+// when it is written: anchorCalendarWhen stores its first firing (its
+// `next_fire_at`) as the `dtstart`. For rows stored before that, nextFireAt
+// pins the fired occurrence as `dtstart` (`schedule`) and callers persist it,
+// so later firings never re-derive the anchor from a DST-shifted firing instant.
 
 export type CalendarSchedule = { readonly at: string } | { readonly rrule: string; readonly dtstart?: string };
 
@@ -214,6 +215,23 @@ export function nextFireAt(schedule: CalendarSchedule, timeZone: string, fired: 
   }
   const result = rule.until && next.getTime() > rule.until.getTime() ? { next: null, missed } : { next, missed };
   return pinned ? { ...result, schedule: pinned } : result;
+}
+
+/**
+ * Calendar When attributes as they must be stored: a recurrence rule written
+ * without a `dtstart` gets its first firing (`next_fire_at`, the first local
+ * wall-clock occurrence in the When's timezone) as its anchor. Anything else —
+ * a one-off, a rule that already has a `dtstart`, a When with no first firing,
+ * a non-calendar When — is returned unchanged.
+ */
+export function anchorCalendarWhen(attributes: Record<string, unknown>): Record<string, unknown> {
+  if (attributes["when_type"] !== "calendar") return attributes;
+  const schedule = attributes["schedule"];
+  const first = attributes["next_fire_at"];
+  if (typeof schedule !== "object" || schedule === null || typeof first !== "string") return attributes;
+  const s = schedule as Record<string, unknown>;
+  if (typeof s["rrule"] !== "string" || s["dtstart"] !== undefined) return attributes;
+  return { ...attributes, schedule: { ...s, dtstart: first } };
 }
 
 export function parseSchedule(value: unknown): CalendarSchedule {
