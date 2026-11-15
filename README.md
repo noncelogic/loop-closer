@@ -39,4 +39,7 @@ them. `tests/schema/` proves the schema on a fresh Compose replica.
 package for aks-obs-01 (namespace `loop-closer`, CNPG cluster `loopcloser-db`, API
 Deployment/Service, suspended per-minute tick CronJob, OpenBao ExternalSecrets). Nothing in
 this repo applies it to a cluster; rollout is estate-side GitOps. There is no public ingress.
-`tests/deploy/manifests.test.ts` renders it with `kustomize` (or `kubectl kustomize`).
+`tests/deploy/manifests.test.ts` renders it with `kustomize` (or `kubectl kustomize`),
+dry-runs it with `kubectl` and schema-validates it with `kubeconform` against pinned
+schemas checked in under `tests/deploy/schemas/` (no network fetch); CI installs all
+three tools, pinned (`.github/scripts/install-k8s-tools.sh`).

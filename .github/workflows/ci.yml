@@ -18,6 +18,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      KUBECTL_VERSION: v1.34.1
+      KUSTOMIZE_VERSION: v5.7.1
+      KUBECONFORM_VERSION: v0.8.0
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,10 +31,40 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      # tests/deploy/manifests.test.ts runs here too; same pinned tools as `manifests`.
+      - name: Install pinned kubectl, kustomize and kubeconform
+        run: bash .github/scripts/install-k8s-tools.sh
       - run: npm run typecheck
       - run: npm run build
       # Includes tests/foundation/local-replica.test.ts, which uses Docker Compose.
       - run: npm test
+
+  # Renders every kustomize overlay and validates it with kubectl client-side
+  # dry-run plus kubeconform schema validation against pinned Kubernetes and
+  # CRD schemas checked in under tests/deploy/schemas/, read as local files only
+  # (tests/deploy/manifests.test.ts). Installs its own pinned,
+  # checksum-verified kubectl, kustomize and kubeconform instead of whatever
+  # the runner image ships. Touches no cluster and reads no secret: no kubeconfig, no
+  # cluster credentials, and the token stays read-only.
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUBECTL_VERSION: v1.34.1
+      KUSTOMIZE_VERSION: v5.7.1
+      KUBECONFORM_VERSION: v0.8.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Install pinned kubectl, kustomize and kubeconform
+        run: bash .github/scripts/install-k8s-tools.sh
+      - run: node --test tests/deploy/manifests.test.ts
 
   # Builds the service image on every run; publishes to GHCR only on pushes to
   # main. Never touches a cluster: rollout of deploy/ is estate-side GitOps.
