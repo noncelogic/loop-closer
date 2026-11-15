@@ -91,6 +91,11 @@ export interface AcceptLoopInput {
   acceptor: string;
 }
 
+export interface RejectLoopInput {
+  actor: string;
+  reason: string;
+}
+
 export interface TransitionInput {
   to_state: LoopState;
   actor: string;
@@ -139,4 +144,13 @@ export interface FiringEffect {
   loop_id: string;
   next_state?: LoopState;
   via_edge_ids?: string[];
+}
+
+/** OpenAPI HealthResult, without the requested window. */
+export interface HealthMetrics {
+  snapshot_at: string;
+  breach_pct: number;
+  manual_correction_count: number;
+  median_open_age_seconds: number | null;
+  abandonment_count: number;
 }

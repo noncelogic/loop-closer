@@ -40,6 +40,11 @@ spec:
                 secretKeyRef:
                   name: loopcloser-db-app
                   key: uri
+          volumeMounts:
+            # Per-agent API keys (src/config.ts API_KEYS_DIR); every /v1 call needs one.
+            - name: api-keys
+              mountPath: /etc/loopcloser/api-keys
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -61,3 +66,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: api-keys
+          secret:
+            secretName: loopcloser-api-keys
