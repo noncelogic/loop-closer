@@ -5,7 +5,7 @@
 // The kernel only talks to GraphStore. InMemoryGraphStore is the reference
 // implementation used by tests and local runs; a Postgres implementation sits
 // behind the same interface.
-import type { Edge, LedgerEvent, Loop, Node } from "./types.ts";
+import type { Communication, Edge, LedgerEvent, Loop, Node, OutboxEntry, SendRequest } from "./types.ts";
 
 /** Operations available inside one transaction. */
 export interface GraphTx {
@@ -24,6 +24,15 @@ export interface GraphTx {
   findEventByIdempotencyKey(key: string): LedgerEvent | undefined;
   /** The full ledger in append order. */
   ledger(): LedgerEvent[];
+  getCommunication(id: string): Communication | undefined;
+  putCommunication(communication: Communication): void;
+  /** The send request on a communication, if one was made. */
+  getSendRequest(communicationId: string): SendRequest | undefined;
+  putSendRequest(request: SendRequest): void;
+  /** Adds a side effect to the transactional outbox; it commits with the transaction. */
+  enqueue(entry: OutboxEntry): void;
+  /** The outbox in enqueue order. */
+  outbox(): OutboxEntry[];
 }
 
 export interface GraphStore {
@@ -39,6 +48,9 @@ interface State {
   loops: Map<string, Loop>;
   ledger: LedgerEvent[];
   idempotency: Map<string, LedgerEvent>;
+  communications: Map<string, Communication>;
+  sendRequests: Map<string, SendRequest>;
+  outbox: OutboxEntry[];
 }
 
 const copy = <T>(v: T): T => structuredClone(v);
@@ -50,11 +62,23 @@ function cloneState(s: State): State {
     loops: new Map(s.loops),
     ledger: [...s.ledger],
     idempotency: new Map(s.idempotency),
+    communications: new Map(s.communications),
+    sendRequests: new Map(s.sendRequests),
+    outbox: [...s.outbox],
   };
 }
 
 export class InMemoryGraphStore implements GraphStore {
-  #state: State = { nodes: new Map(), edges: new Map(), loops: new Map(), ledger: [], idempotency: new Map() };
+  #state: State = {
+    nodes: new Map(),
+    edges: new Map(),
+    loops: new Map(),
+    ledger: [],
+    idempotency: new Map(),
+    communications: new Map(),
+    sendRequests: new Map(),
+    outbox: [],
+  };
   #queue: Promise<unknown> = Promise.resolve();
 
   transaction<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T> {
@@ -102,6 +126,12 @@ export class InMemoryGraphStore implements GraphStore {
       },
       findEventByIdempotencyKey: (key) => copy(s.idempotency.get(key)),
       ledger: () => s.ledger.map(copy),
+      getCommunication: (id) => copy(s.communications.get(id)),
+      putCommunication: (communication) => (write(), void s.communications.set(communication.id, copy(communication))),
+      getSendRequest: (id) => copy(s.sendRequests.get(id)),
+      putSendRequest: (request) => (write(), void s.sendRequests.set(request.communication_id, copy(request))),
+      enqueue: (entry) => (write(), void s.outbox.push(copy(entry))),
+      outbox: () => s.outbox.map(copy),
     };
   }
 }

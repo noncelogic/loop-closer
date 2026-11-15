@@ -154,3 +154,66 @@ export interface HealthMetrics {
   median_open_age_seconds: number | null;
   abandonment_count: number;
 }
+
+/** SPEC B2.5 Communication. An outbound one is a draft until a send is released (sent_under_authority set then). */
+export interface Communication {
+  id: string;
+  thread_id: string;
+  channel: "email" | "message" | "other";
+  direction: "outbound" | "inbound";
+  participant_who_ids: string[];
+  at: string;
+  body_pointer: string;
+  body_hash: string;
+  loop_id: string;
+  sent_under_authority: Authority | null;
+}
+
+/** OpenAPI RecordCommunicationRequest. */
+export type RecordCommunicationInput = Omit<Communication, "id" | "sent_under_authority">;
+
+/** OpenAPI RequestSendRequest (the loop comes from the path). */
+export interface RequestSendInput {
+  communication_id: string;
+  actor: string;
+}
+
+/** OpenAPI ApproveSendRequest. */
+export interface ApproveSendInput {
+  approver: string;
+}
+
+/**
+ * A request_send on one communication: `pending_approval` until Joe approves it
+ * (joe-approves-each), `enqueued` once the send is in the outbox.
+ */
+export interface SendRequest {
+  communication_id: string;
+  loop_id: string;
+  authority: Authority;
+  status: "pending_approval" | "enqueued";
+  requested_by: string;
+  requested_at: string;
+}
+
+/** OpenAPI SendRequestResult. */
+export interface SendRequestResult {
+  communication_id: string;
+  authority: Authority;
+  status: SendRequest["status"];
+}
+
+/** OpenAPI ApproveSendResult. */
+export interface ApproveSendResult {
+  communication_id: string;
+  status: "released";
+  ledger_event: LedgerEvent;
+}
+
+/** A side effect in the transactional outbox (TECH-STACK §6), citing the ledger event that caused it. */
+export interface OutboxEntry {
+  ledger_event_id: string;
+  topic: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
