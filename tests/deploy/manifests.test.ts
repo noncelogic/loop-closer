@@ -17,8 +17,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import { parseAllDocuments } from "yaml";
 import { CONFIG_ENV, DEFAULT_PORT, loadConfig } from "../../src/config.ts";
 
@@ -65,11 +66,16 @@ function overlays(): string[] {
 
 // The environment every validator runs in: no kubeconfig and no in-cluster
 // service variables, so there is no cluster to reach and no credential to
-// read even by accident.
+// read even by accident; and every HTTP(S) request goes to a proxy that does
+// not exist, so a validator that tried to fetch anything would fail loudly
+// rather than depend on the network.
+const DEAD_PROXY = "http://127.0.0.1:9";
 function offlineEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, KUBECONFIG: join(repoRoot, ".no-kubeconfig") };
   delete env["KUBERNETES_SERVICE_HOST"];
   delete env["KUBERNETES_SERVICE_PORT"];
+  for (const v of ["NO_PROXY", "no_proxy"]) delete env[v];
+  for (const v of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) env[v] = DEAD_PROXY;
   return env;
 }
 
@@ -103,15 +109,18 @@ function kubectlDryRun(manifests: string): Obj[] {
   return docs.flatMap((o) => (o["kind"] === "List" ? (o["items"] as Obj[]) : [o]));
 }
 
-// Schemas are pinned to fixed commits, so the check cannot drift with upstream
-// edits. Built-in kinds validate against the Kubernetes OpenAPI schema for
+// Schemas are checked in under tests/deploy/schemas/ (copied from fixed
+// upstream commits; see its README.md and SHA256SUMS), so validation reads
+// local files only and cannot drift with upstream edits or fail on a network
+// error. Built-in kinds validate against the Kubernetes OpenAPI schema for
 // KUBERNETES_VERSION (strict: unknown fields fail too); CRD kinds (CloudNativePG
-// Cluster, ExternalSecret, ...) against the CRDs-catalog extraction of the
+// Cluster, ExternalSecret) against the CRDs-catalog extraction of the
 // operator's own CRD schema. A kind with no schema fails; nothing is skipped.
 const KUBERNETES_VERSION = "1.34.1";
+const SCHEMA_DIR = join(repoRoot, "tests", "deploy", "schemas");
 const SCHEMA_LOCATIONS = [
-  "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/2bfaff3898a7a4fa4e4760da3d2656211c9b4c71/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json",
-  "https://raw.githubusercontent.com/datreeio/CRDs-catalog/3e8a8916ca1b7af6464606c2c2f5869dbafa9653/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json",
+  join(SCHEMA_DIR, "kubernetes", "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}", "{{ .ResourceKind }}{{ .KindSuffix }}.json"),
+  join(SCHEMA_DIR, "crds", "{{ .Group }}", "{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json"),
 ];
 
 type KubeconformResult = { kind: string; name: string; version: string; status: string; msg: string };
@@ -346,4 +355,64 @@ test("the manifest validation rejects an invalid manifest", () => {
     () => validate("apiVersion: example.invalid/v1\nkind: Nothing\nmetadata:\n  name: x\n"),
     /kubeconform/,
   );
+});
+
+// Every $ref value anywhere in a JSON document.
+function refs(node: unknown): string[] {
+  if (Array.isArray(node)) return node.flatMap(refs);
+  if (node === null || typeof node !== "object") return [];
+  return Object.entries(node).flatMap(([k, v]) => (k === "$ref" && typeof v === "string" ? [v] : refs(v)));
+}
+
+function schemaFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? schemaFiles(join(dir, e.name)) : e.name.endsWith(".json") ? [join(dir, e.name)] : [],
+  );
+}
+
+test("schema validation uses only the checked-in schemas, with no reference that leaves them", () => {
+  // kubeconform is given local paths only, never a URL.
+  for (const l of SCHEMA_LOCATIONS) {
+    assert.ok(l.startsWith(SCHEMA_DIR + "/"), `schema location ${l} is not under ${SCHEMA_DIR}`);
+    assert.doesNotMatch(l, /:\/\//, `schema location ${l} is a URL`);
+  }
+
+  // The checked-in files are exactly the recorded upstream copies.
+  const recorded = new Map(
+    readFileSync(join(SCHEMA_DIR, "SHA256SUMS"), "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => {
+        const m = /^([0-9a-f]{64})  (\S+)$/.exec(l);
+        assert.ok(m, `malformed SHA256SUMS line: ${l}`);
+        return [m[2]!, m[1]!] as const;
+      }),
+  );
+  const files = schemaFiles(SCHEMA_DIR);
+  assert.deepEqual(files.map((f) => relative(SCHEMA_DIR, f)).sort(), [...recorded.keys()].sort(), "SHA256SUMS lists every schema");
+  for (const f of files) {
+    const bytes = readFileSync(f);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), recorded.get(relative(SCHEMA_DIR, f)), `${f} checksum`);
+
+    // Self-contained: every $ref (transitively, since all are fragments of the
+    // same file) resolves inside the file, and the meta-schema is a draft the
+    // validator has built in, so nothing is ever fetched.
+    const schema = JSON.parse(bytes.toString("utf8")) as Obj;
+    for (const r of refs(schema)) assert.match(r, /^#/, `${f}: $ref ${r} leaves the file`);
+    const meta = schema["$schema"];
+    if (meta !== undefined) assert.match(String(meta), /^https?:\/\/json-schema\.org\/(schema|draft-0[467]\/schema|draft\/20(19-09|20-12)\/schema)#?$/, `${f}: $schema`);
+  }
+
+  // Every kind the overlays and the rejection test validate has a schema here.
+  for (const want of [
+    "kubernetes/v1.34.1-standalone-strict/configmap-v1.json",
+    "kubernetes/v1.34.1-standalone-strict/namespace-v1.json",
+    "kubernetes/v1.34.1-standalone-strict/service-v1.json",
+    "kubernetes/v1.34.1-standalone-strict/deployment-apps-v1.json",
+    "kubernetes/v1.34.1-standalone-strict/cronjob-batch-v1.json",
+    "crds/postgresql.cnpg.io/cluster_v1.json",
+    "crds/external-secrets.io/externalsecret_v1.json",
+  ]) {
+    assert.ok(recorded.has(want), `missing schema ${want}`);
+  }
 });

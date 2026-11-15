@@ -41,4 +41,5 @@ Deployment/Service, suspended per-minute tick CronJob, OpenBao ExternalSecrets).
 this repo applies it to a cluster; rollout is estate-side GitOps. There is no public ingress.
 `tests/deploy/manifests.test.ts` renders it with `kustomize` (or `kubectl kustomize`),
 dry-runs it with `kubectl` and schema-validates it with `kubeconform` against pinned
-schemas; CI installs all three, pinned (`.github/scripts/install-k8s-tools.sh`).
+schemas checked in under `tests/deploy/schemas/` (no network fetch); CI installs all
+three tools, pinned (`.github/scripts/install-k8s-tools.sh`).

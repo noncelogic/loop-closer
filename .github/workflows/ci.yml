@@ -41,7 +41,8 @@ jobs:
 
   # Renders every kustomize overlay and validates it with kubectl client-side
   # dry-run plus kubeconform schema validation against pinned Kubernetes and
-  # CRD schemas (tests/deploy/manifests.test.ts). Installs its own pinned,
+  # CRD schemas checked in under tests/deploy/schemas/, read as local files only
+  # (tests/deploy/manifests.test.ts). Installs its own pinned,
   # checksum-verified kubectl, kustomize and kubeconform instead of whatever
   # the runner image ships. Touches no cluster and reads no secret: no kubeconfig, no
   # cluster credentials, and the token stays read-only.
