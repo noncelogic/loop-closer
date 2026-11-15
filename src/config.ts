@@ -1,3 +1,6 @@
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+
 /**
  * The service's config contract: the environment variables it reads. The
  * deploy/ manifests are checked against this (tests/deploy/manifests.test.ts).
@@ -26,4 +29,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const host = env[CONFIG_ENV.host] ?? "0.0.0.0";
   const databaseUrl = env[CONFIG_ENV.databaseUrl];
   return databaseUrl ? { host, port, databaseUrl } : { host, port };
+}
+
+/**
+ * Where the per-agent API keys are mounted: the `loopcloser-api-keys` secret
+ * (deploy/external-secrets.yaml), one file per agent principal holding its key.
+ */
+export const API_KEYS_DIR = "/etc/loopcloser/api-keys";
+
+/** Agent principal → API key, from a mounted secret directory; none if it is absent. */
+export function loadApiKeys(dir: string = API_KEYS_DIR): Map<string, string> {
+  const keys = new Map<string, string>();
+  if (!existsSync(dir)) return keys;
+  for (const name of readdirSync(dir).sort()) {
+    if (name.startsWith(".")) continue; // the kubelet's ..data bookkeeping entries
+    const path = join(dir, name);
+    if (!statSync(path).isFile()) continue;
+    const key = readFileSync(path, "utf8").trim();
+    if (key) keys.set(name, key);
+  }
+  return keys;
 }

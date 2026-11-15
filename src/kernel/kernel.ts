@@ -15,6 +15,7 @@ import type {
   FireEventInput,
   FireEventResult,
   FiringEffect,
+  HealthMetrics,
   LedgerEvent,
   LedgerEventType,
   Loop,
@@ -25,6 +26,7 @@ import type {
   OpenLoopsFilter,
   PolicyRef,
   ProposeLoopInput,
+  RejectLoopInput,
   TransitionInput,
   TransitionResult,
 } from "./types.ts";
@@ -234,6 +236,28 @@ export class Kernel {
     });
   }
 
+  /** reject_loop: proposed → closed_with_reason (rejected) at intake; the ledger event is kept. */
+  rejectLoop(loopId: string, input: RejectLoopInput): Promise<LoopWithEvent> {
+    return this.#store.transaction((tx) => {
+      const loop = this.#loop(tx, loopId);
+      if (loop.state !== "proposed")
+        throw new KernelError("conflict", `loop ${loopId} is ${loop.state}; only a proposed loop can be rejected`);
+      const at = this.#at();
+      const next: Loop = { ...loop, state: "closed_with_reason", closed_at: at, close_reason: "rejected" };
+      this.#check("loop", next);
+      tx.putLoop(next);
+      const ledger_event = this.#append(tx, {
+        at,
+        actor: input.actor,
+        event_type: "loop_rejected",
+        subject_ids: [loopId],
+        payload: { from_state: "proposed", to_state: "closed_with_reason", reason: input.reason },
+        idempotency_key: null,
+      });
+      return { loop: next, ledger_event };
+    });
+  }
+
   // ---- manual firing ------------------------------------------------------
 
   /** transition: a validated state change + ledger event, atomically; a replayed idempotency key applies once. */
@@ -378,6 +402,34 @@ export class Kernel {
       const when = tx.getNode(query.when_id);
       if (!when || when.kind !== "when") throw new KernelError("not_found", `When ${query.when_id} does not exist`);
       return { effects: this.#effectsOfWhen(tx, when.id) };
+    });
+  }
+
+  /**
+   * health (SPEC §5): metrics for redesign, never a gate. Over the window
+   * ending now: Joe-initiated manual_correction count and loops abandoned;
+   * at the snapshot: breach % and the median age of accepted, non-closed loops.
+   */
+  health(windowSeconds: number): Promise<HealthMetrics> {
+    return this.#store.read((tx) => {
+      const now = this.#now().getTime();
+      const since = now - windowSeconds * 1000;
+      const inWindow = (at: string | null): boolean => at !== null && Date.parse(at) >= since && Date.parse(at) <= now;
+      const loops = tx.listLoops();
+      const ages = loops
+        .filter((l) => !CLOSED.has(l.state) && l.opened_at !== null)
+        .map((l) => Math.max(0, Math.floor((now - Date.parse(l.opened_at as string)) / 1000)))
+        .sort((a, b) => a - b);
+      const mid = Math.floor(ages.length / 2);
+      const median = ages.length === 0 ? null : ages.length % 2 === 1 ? ages[mid]! : (ages[mid - 1]! + ages[mid]!) / 2;
+      return {
+        snapshot_at: new Date(now).toISOString(),
+        // Ageing policies (SPEC B4) are not evaluated yet, so nothing is breaching (as in open_loops).
+        breach_pct: 0,
+        manual_correction_count: tx.ledger().filter((e) => e.event_type === "manual_correction" && inWindow(e.at)).length,
+        median_open_age_seconds: median,
+        abandonment_count: loops.filter((l) => l.close_reason === "abandoned" && inWindow(l.closed_at)).length,
+      };
     });
   }
 

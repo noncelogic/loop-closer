@@ -7,7 +7,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ajv2020 } from "ajv/dist/2020.js";
+import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
 export const SCHEMA_VERSION = "v1";
 export const SCHEMA_ID_BASE = `https://loopcloser.noncelogic.invalid/schemas/${SCHEMA_VERSION}/`;
@@ -161,6 +161,65 @@ function resolveLocal(doc: Json, pointer: string): unknown {
   return cur;
 }
 
+// OpenAPI component schemas become $defs of one registered schema so local refs resolve.
+const OPENAPI_BASE = "urn:loopcloser:openapi";
+
+function rebase(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(rebase);
+  if (!node || typeof node !== "object") return node;
+  const out: Json = {};
+  for (const [k, v] of Object.entries(node)) {
+    out[k] =
+      k === "$ref" && typeof v === "string" && v.startsWith("#/components/schemas/")
+        ? `${OPENAPI_BASE}#/$defs/${v.slice("#/components/schemas/".length)}`
+        : rebase(v);
+  }
+  return out;
+}
+
+function registerOpenApiComponents(ajv: Ajv2020, doc: Json): Json {
+  const components = ((doc.components as Json | undefined)?.schemas ?? {}) as Json;
+  ajv.addSchema({ $id: OPENAPI_BASE, $defs: rebase(components) as Json });
+  return components;
+}
+
+/** Compiled request, response and parameter validators of the OpenAPI operations, by operationId. */
+export interface ApiValidator {
+  readonly ajv: Ajv2020;
+  request(operationId: string): ValidateFunction | undefined;
+  response(operationId: string, status: number): ValidateFunction | undefined;
+  parameter(operationId: string, name: string): ValidateFunction | undefined;
+}
+
+/** Validators for the frozen API contract (contracts/openapi.json). */
+export function createApiValidator(doc: Json = loadOpenApi()): ApiValidator {
+  const ajv = createValidator();
+  registerOpenApiComponents(ajv, doc);
+  const requests = new Map<string, ValidateFunction>();
+  const responses = new Map<string, ValidateFunction>();
+  const parameters = new Map<string, ValidateFunction>();
+  const compile = (schema: unknown): ValidateFunction => ajv.compile(rebase(schema) as Json);
+  for (const o of listOperations(doc)) {
+    if (!o.operationId) continue;
+    for (const p of (o.operation.parameters ?? []) as Json[])
+      if (p.schema) parameters.set(`${o.operationId} ${String(p.name)}`, compile(p.schema));
+    const body = o.operation.requestBody as Json | undefined;
+    const bodyJson = (body?.content as Json | undefined)?.["application/json"] as Json | undefined;
+    if (bodyJson?.schema) requests.set(o.operationId, compile(bodyJson.schema));
+    for (const [status, res] of Object.entries((o.operation.responses ?? {}) as Record<string, Json>)) {
+      const resolved = (typeof res.$ref === "string" ? resolveLocal(doc, res.$ref) : res) as Json | undefined;
+      const json = (resolved?.content as Json | undefined)?.["application/json"] as Json | undefined;
+      if (json?.schema) responses.set(`${o.operationId} ${status}`, compile(json.schema));
+    }
+  }
+  return {
+    ajv,
+    request: (operationId) => requests.get(operationId),
+    response: (operationId, status) => responses.get(`${operationId} ${status}`),
+    parameter: (operationId, name) => parameters.get(`${operationId} ${name}`),
+  };
+}
+
 /**
  * Returns every disagreement between the OpenAPI document and the domain
  * schemas; an empty list means the contract holds.
@@ -212,22 +271,7 @@ export function checkContract(doc: Json = loadOpenApi()): string[] {
   // 4. Every request/response schema compiles against the domain schemas.
   if (problems.length === 0) {
     const ajv = createValidator();
-    // OpenAPI component schemas become $defs of one registered schema so local refs resolve.
-    const base = "urn:loopcloser:openapi";
-    const rebase = (node: unknown): unknown => {
-      if (Array.isArray(node)) return node.map(rebase);
-      if (!node || typeof node !== "object") return node;
-      const out: Json = {};
-      for (const [k, v] of Object.entries(node)) {
-        out[k] =
-          k === "$ref" && typeof v === "string" && v.startsWith("#/components/schemas/")
-            ? `${base}#/$defs/${v.slice("#/components/schemas/".length)}`
-            : rebase(v);
-      }
-      return out;
-    };
-    const components = ((doc.components as Json | undefined)?.schemas ?? {}) as Json;
-    ajv.addSchema({ $id: base, $defs: rebase(components) as Json });
+    const components = registerOpenApiComponents(ajv, doc);
     const compile = (where: string, schema: unknown): void => {
       try {
         ajv.compile(rebase(schema) as Json);
