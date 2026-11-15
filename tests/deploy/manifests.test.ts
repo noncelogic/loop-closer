@@ -2,13 +2,20 @@
 // the API Deployment's environment matches the frozen config contract
 // (src/config.ts: PORT, DATABASE_URL).
 //
+// LC-M3-MANIFEST-CHECK acceptance: every kustomize overlay in the repository
+// renders and passes kubectl client-side dry-run validation. CI's `manifests`
+// job runs this file with its own pinned kubectl and kustomize ($KUBECTL,
+// $KUSTOMIZE); see .github/workflows/ci.yml.
+//
 // Renders with a real kustomize: $KUSTOMIZE if set, else `kustomize` on PATH,
-// else `kubectl kustomize`. Nothing here talks to a cluster.
+// else `kubectl kustomize`. Validates with $KUBECTL if set, else `kubectl` on
+// PATH. A missing tool fails the test; it never skips. Nothing here talks to a
+// cluster or reads a secret.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseAllDocuments } from "yaml";
 import { CONFIG_ENV, DEFAULT_PORT, loadConfig } from "../../src/config.ts";
 
@@ -36,7 +43,57 @@ function kustomizeBuild(dir: string): string {
   const explicit = process.env["KUSTOMIZE"];
   if (explicit) return execFileSync(explicit, ["build", dir], { encoding: "utf8" });
   if (onPath("kustomize")) return execFileSync("kustomize", ["build", dir], { encoding: "utf8" });
-  return execFileSync("kubectl", ["kustomize", dir], { encoding: "utf8" });
+  return execFileSync(process.env["KUBECTL"] || "kubectl", ["kustomize", dir], { encoding: "utf8" });
+}
+
+const KUSTOMIZATION_FILES = new Set(["kustomization.yaml", "kustomization.yml", "Kustomization"]);
+
+// Every directory holding a kustomization, tracked or new (gitignored paths
+// such as node_modules/ are excluded).
+function overlays(): string[] {
+  const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter((f) => f !== "" && KUSTOMIZATION_FILES.has(basename(f)));
+  return [...new Set(files.map((f) => dirname(f)))].sort();
+}
+
+// kubectl's client-side dry-run in its offline form: `--local` decodes and
+// maps every object without asking an API server, and `--dry-run=client`
+// guarantees nothing is sent. The environment carries no kubeconfig and no
+// in-cluster service variables, so there is no cluster to reach and no
+// credential to read even by accident. Throws (with kubectl's stderr) on any
+// object kubectl rejects.
+function kubectlDryRun(manifests: string): Obj[] {
+  const kubectl = process.env["KUBECTL"] || "kubectl";
+  const env: NodeJS.ProcessEnv = { ...process.env, KUBECONFIG: join(repoRoot, ".no-kubeconfig") };
+  delete env["KUBERNETES_SERVICE_HOST"];
+  delete env["KUBERNETES_SERVICE_PORT"];
+  const out = execFileSync(
+    kubectl,
+    [
+      "annotate",
+      "--local",
+      "--dry-run=client",
+      "--filename=-",
+      "--output=yaml",
+      "manifest-check.loopcloser.dev/validated=true",
+    ],
+    { input: manifests, encoding: "utf8", env, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  const docs = parseAllDocuments(out)
+    .map((doc) => {
+      assert.equal(doc.errors.length, 0, String(doc.errors[0]));
+      return doc.toJS() as Obj | null;
+    })
+    .filter((o): o is Obj => o !== null);
+  return docs.flatMap((o) => (o["kind"] === "List" ? (o["items"] as Obj[]) : [o]));
+}
+
+function identity(o: Obj): string {
+  return `${o["apiVersion"]} ${o["kind"]} ${o["metadata"]?.["namespace"] ?? ""}/${o["metadata"]?.["name"]}`;
 }
 
 function render(): Obj[] {
@@ -139,4 +196,46 @@ test("Dockerfile builds on Node 24 with tsc and runs node dist/main.js", () => {
   assert.match(dockerfile, /^FROM node:24[\w.-]*/m);
   assert.match(dockerfile, /npm run build/);
   assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/m);
+});
+
+test("every kustomize overlay renders and passes kubectl client-side dry-run validation", () => {
+  const dirs = overlays();
+  assert.ok(dirs.includes("deploy"), `expected deploy/ among the overlays, found ${JSON.stringify(dirs)}`);
+
+  for (const dir of dirs) {
+    let rendered: string;
+    try {
+      rendered = kustomizeBuild(join(repoRoot, dir));
+    } catch (err) {
+      assert.fail(`kustomize build ${dir} failed: ${(err as Error).message}`);
+    }
+    const objs = parseAllDocuments(rendered)
+      .map((doc) => {
+        assert.equal(doc.errors.length, 0, `${dir}: ${String(doc.errors[0])}`);
+        return doc.toJS() as Obj | null;
+      })
+      .filter((o): o is Obj => o !== null);
+    assert.ok(objs.length > 0, `${dir} renders no objects`);
+
+    let validated: Obj[];
+    try {
+      validated = kubectlDryRun(rendered);
+    } catch (err) {
+      assert.fail(`kubectl client-side dry-run rejected ${dir}: ${(err as Error).message}`);
+    }
+    // kubectl accepted every rendered object, one for one.
+    assert.deepEqual(validated.map(identity).sort(), objs.map(identity).sort(), `${dir}: dry-run object set`);
+  }
+});
+
+test("the kubectl client-side dry-run rejects an invalid manifest", () => {
+  // The same call accepts a valid object, so the rejections below come from
+  // validation and not from a missing or broken kubectl.
+  const ok = kubectlDryRun("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ok\n");
+  assert.deepEqual(ok.map((o) => o["metadata"]?.["name"]), ["ok"]);
+  // A document kubectl cannot decode as a Kubernetes object (no kind) must
+  // fail the check rather than pass silently.
+  assert.throws(() => kubectlDryRun("apiVersion: v1\nmetadata:\n  name: no-kind\n"));
+  // A document that is not valid YAML must fail too.
+  assert.throws(() => kubectlDryRun("apiVersion: v1\nkind: ConfigMap\nmetadata: [unclosed\n"));
 });

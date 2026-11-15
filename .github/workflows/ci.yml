@@ -32,6 +32,47 @@ jobs:
       # Includes tests/foundation/local-replica.test.ts, which uses Docker Compose.
       - run: npm test
 
+  # Renders every kustomize overlay and validates it with kubectl client-side
+  # dry-run (tests/deploy/manifests.test.ts). Installs its own pinned,
+  # checksum-verified kubectl and kustomize instead of whatever the runner
+  # image ships. Touches no cluster and reads no secret: no kubeconfig, no
+  # cluster credentials, and the token stays read-only.
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUBECTL_VERSION: v1.34.1
+      KUSTOMIZE_VERSION: v5.7.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Install pinned kubectl and kustomize
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/k8s-tools"
+          mkdir -p "$bin"
+          cd "$bin"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "$(curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256")  kubectl" | sha256sum --check --strict
+          chmod +x kubectl
+          tarball="kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}"
+          curl -fsSLo "$tarball" "$base/$tarball"
+          curl -fsSL "$base/checksums.txt" | grep " ${tarball}\$" | sha256sum --check --strict
+          tar -xzf "$tarball" kustomize
+          rm "$tarball"
+          echo "KUBECTL=$bin/kubectl" >> "$GITHUB_ENV"
+          echo "KUSTOMIZE=$bin/kustomize" >> "$GITHUB_ENV"
+          ./kubectl version --client
+          ./kustomize version
+      - run: node --test tests/deploy/manifests.test.ts
+
   # Builds the service image on every run; publishes to GHCR only on pushes to
   # main. Never touches a cluster: rollout of deploy/ is estate-side GitOps.
   image:
