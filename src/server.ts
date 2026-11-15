@@ -8,7 +8,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createApiValidator, type ApiValidator } from "./contracts/index.ts";
 import { InMemoryGraphStore, Kernel, KernelError } from "./kernel/index.ts";
-import type { FireEventInput, OpenLoopsFilter, ProposeLoopInput, TransitionInput } from "./kernel/index.ts";
+import type { FireEventInput, LedgerEvent, Loop, LoopState, OpenLoopsFilter, ProposeLoopInput, TransitionInput } from "./kernel/index.ts";
 
 export const SERVICE_NAME = "loopcloser";
 /** The contract's `servers[0].url`. */
@@ -108,6 +108,23 @@ function kernelReply(err: KernelError): Reply {
   return { status, body: { error: err.code, message: err.message } };
 }
 
+const CLOSED_STATES: ReadonlySet<LoopState> = new Set(["closed", "closed_with_reason"]);
+
+/**
+ * The loop as a transition event left it. A transition changes only state,
+ * closed_at and close_reason; closed states are terminal, so a loop that this
+ * event closed still carries the close_reason it was given.
+ */
+function loopAfter(current: Loop, event: LedgerEvent): Loop {
+  const to = event.payload["to_state"] as LoopState;
+  return {
+    ...current,
+    state: to,
+    closed_at: CLOSED_STATES.has(to) ? event.at : null,
+    close_reason: to === "closed_with_reason" ? current.close_reason : null,
+  };
+}
+
 function routes(kernel: Kernel, api: ApiValidator): Route[] {
   const id = "(lc_[A-Za-z0-9][A-Za-z0-9_-]*)";
   const param = (operationId: string, name: string, raw: string): string => {
@@ -142,9 +159,11 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
       method: "POST",
       pattern: new RegExp(`^/loops/${id}/transition$`),
       handle: async ({ params, body }) => {
-        // A replayed idempotency key returns the first change, applied once (kernel).
-        const { loop, ledger_event } = await kernel.transition(params[0]!, body as TransitionInput);
-        return { status: 200, body: { loop, ledger_event } };
+        // A replayed idempotency key is applied once (kernel) and answers with the
+        // first result: the kernel hands back the first ledger event but the loop as
+        // it is now, so the loop is restored to how that event left it.
+        const { loop, ledger_event, applied } = await kernel.transition(params[0]!, body as TransitionInput);
+        return { status: 200, body: { loop: applied ? loop : loopAfter(loop, ledger_event), ledger_event } };
       },
     },
     {
@@ -243,7 +262,13 @@ export function createServer(options: ServerOptions = {}): Server {
       write(res, 200, { service: SERVICE_NAME, status: "ok" });
       return;
     }
-    const url = new URL(req.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+    } catch {
+      write(res, 400, { error: "bad_request", message: "the request target is not a valid URL" });
+      return;
+    }
     const path = url.pathname.startsWith(`${API_PREFIX}/`) ? url.pathname.slice(API_PREFIX.length) : undefined;
     let route: Route | undefined;
     let params: string[] = [];

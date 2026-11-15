@@ -3,7 +3,7 @@
 // bodies that validate against the frozen contract.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { createApiValidator } from "../../src/contracts/index.ts";
 import { Kernel, type InMemoryGraphStore } from "../../src/kernel/index.ts";
@@ -187,6 +187,42 @@ test("a repeated transition with the same idempotency key returns the first resu
   // The same key for a different change is a conflict.
   const reused = await call("transition", "POST", `/loops/${loopId}/transition`, { ...request, to_state: "waiting" });
   assert.equal(reused.status, 409);
+});
+
+test("a replayed transition returns the first result after a later transition", async () => {
+  const loopId = await proposeAndAccept("Replay after change", "lc_what_replay");
+  const toWaiting = { to_state: "waiting", actor: "agent:juno", evidence, idempotency_key: "http-replay-a" };
+
+  const first = await call("transition", "POST", `/loops/${loopId}/transition`, toWaiting);
+  assert.equal(first.status, 200);
+  assert.equal((first.body as Obj)["loop"]["state"], "waiting");
+  tick(60);
+  const later = await call("transition", "POST", `/loops/${loopId}/transition`, { ...toWaiting, to_state: "chased", idempotency_key: "http-replay-b" });
+  assert.equal(later.status, 200);
+  assert.equal((later.body as Obj)["loop"]["state"], "chased");
+
+  const replay = await call("transition", "POST", `/loops/${loopId}/transition`, toWaiting);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(replay.body, first.body);
+
+  // The replay changed nothing: the loop stays chased.
+  const loop = await store.read((tx) => tx.getLoop(loopId));
+  assert.equal(loop?.state, "chased");
+});
+
+test("a request target that is not a valid URL is a client error and the server keeps serving", async () => {
+  const { port } = server.address() as AddressInfo;
+  const raw = await new Promise<string>((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => socket.end("GET //[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"));
+    let data = "";
+    socket.on("data", (chunk) => (data += chunk.toString("utf8")));
+    socket.on("end", () => resolve(data));
+    socket.on("error", reject);
+  });
+  assert.match(raw, /^HTTP\/1\.1 400 /);
+
+  const healthz = await fetch(`${base}/healthz`);
+  assert.equal(healthz.status, 200);
 });
 
 test("what-fires-next lists the next firing of an open loop", async () => {
