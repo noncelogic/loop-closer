@@ -31,7 +31,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
-      # tests/deploy/manifests.test.ts runs here too; same pinned tools as `manifests`.
+      # tests/deploy/manifests.test.ts and deploy/tests/external-secret.test.ts
+      # run here too; same pinned tools as `manifests`.
       - name: Install pinned kubectl, kustomize and kubeconform
         run: bash .github/scripts/install-k8s-tools.sh
       - run: npm run typecheck
@@ -64,7 +65,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Install pinned kubectl, kustomize and kubeconform
         run: bash .github/scripts/install-k8s-tools.sh
-      - run: node --test tests/deploy/manifests.test.ts
+      - run: node --test tests/deploy/manifests.test.ts deploy/tests/external-secret.test.ts
 
   # Builds the service image on every run; publishes to GHCR only on pushes to
   # main. Never touches a cluster: rollout of deploy/ is estate-side GitOps.
