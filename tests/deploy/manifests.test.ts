@@ -3,13 +3,16 @@
 // (src/config.ts: PORT, DATABASE_URL).
 //
 // LC-M3-MANIFEST-CHECK acceptance: every kustomize overlay in the repository
-// renders and passes kubectl client-side dry-run validation. CI's `manifests`
-// job runs this file with its own pinned kubectl and kustomize ($KUBECTL,
-// $KUSTOMIZE); see .github/workflows/ci.yml.
+// renders and passes kubectl client-side dry-run validation, and every rendered
+// object validates against its pinned Kubernetes or CRD schema. CI runs this
+// file with its own pinned kubectl, kustomize and kubeconform ($KUBECTL,
+// $KUSTOMIZE, $KUBECONFORM); see .github/workflows/ci.yml and
+// .github/scripts/install-k8s-tools.sh.
 //
 // Renders with a real kustomize: $KUSTOMIZE if set, else `kustomize` on PATH,
-// else `kubectl kustomize`. Validates with $KUBECTL if set, else `kubectl` on
-// PATH. A missing tool fails the test; it never skips. Nothing here talks to a
+// else `kubectl kustomize`. Dry-runs with $KUBECTL if set, else `kubectl` on
+// PATH. Schema-validates with $KUBECONFORM if set, else `kubeconform` on PATH.
+// A missing tool fails the test; it never skips. Nothing here talks to a
 // cluster or reads a secret.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -60,17 +63,25 @@ function overlays(): string[] {
   return [...new Set(files.map((f) => dirname(f)))].sort();
 }
 
-// kubectl's client-side dry-run in its offline form: `--local` decodes and
-// maps every object without asking an API server, and `--dry-run=client`
-// guarantees nothing is sent. The environment carries no kubeconfig and no
-// in-cluster service variables, so there is no cluster to reach and no
-// credential to read even by accident. Throws (with kubectl's stderr) on any
-// object kubectl rejects.
-function kubectlDryRun(manifests: string): Obj[] {
-  const kubectl = process.env["KUBECTL"] || "kubectl";
+// The environment every validator runs in: no kubeconfig and no in-cluster
+// service variables, so there is no cluster to reach and no credential to
+// read even by accident.
+function offlineEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, KUBECONFIG: join(repoRoot, ".no-kubeconfig") };
   delete env["KUBERNETES_SERVICE_HOST"];
   delete env["KUBERNETES_SERVICE_PORT"];
+  return env;
+}
+
+// kubectl's client-side dry-run in its offline form: `--local` decodes and
+// maps every object without asking an API server, and `--dry-run=client`
+// guarantees nothing is sent. This catches undecodable documents (bad YAML, no
+// kind) but works on unstructured objects, so it does not check field types;
+// kubeconformValidate below does. Throws (with kubectl's stderr) on any object
+// kubectl rejects.
+function kubectlDryRun(manifests: string): Obj[] {
+  const kubectl = process.env["KUBECTL"] || "kubectl";
+  const env = offlineEnv();
   const out = execFileSync(
     kubectl,
     [
@@ -90,6 +101,65 @@ function kubectlDryRun(manifests: string): Obj[] {
     })
     .filter((o): o is Obj => o !== null);
   return docs.flatMap((o) => (o["kind"] === "List" ? (o["items"] as Obj[]) : [o]));
+}
+
+// Schemas are pinned to fixed commits, so the check cannot drift with upstream
+// edits. Built-in kinds validate against the Kubernetes OpenAPI schema for
+// KUBERNETES_VERSION (strict: unknown fields fail too); CRD kinds (CloudNativePG
+// Cluster, ExternalSecret, ...) against the CRDs-catalog extraction of the
+// operator's own CRD schema. A kind with no schema fails; nothing is skipped.
+const KUBERNETES_VERSION = "1.34.1";
+const SCHEMA_LOCATIONS = [
+  "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/2bfaff3898a7a4fa4e4760da3d2656211c9b4c71/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json",
+  "https://raw.githubusercontent.com/datreeio/CRDs-catalog/3e8a8916ca1b7af6464606c2c2f5869dbafa9653/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json",
+];
+
+type KubeconformResult = { kind: string; name: string; version: string; status: string; msg: string };
+
+// Schema validation without an API server: kubeconform checks each object's
+// fields and types against its pinned schema (a Deployment with
+// `spec.replicas: "invalid"` fails here, though kubectl's dry-run accepts it).
+// Returns the identity of every object it found valid; throws with
+// kubeconform's findings when any object is invalid, errors, or is skipped.
+function kubeconformValidate(manifests: string): string[] {
+  const kubeconform = process.env["KUBECONFORM"] || "kubeconform";
+  const args = [
+    "-strict",
+    "-summary",
+    "-verbose",
+    "-output=json",
+    `-kubernetes-version=${KUBERNETES_VERSION}`,
+    ...SCHEMA_LOCATIONS.map((l) => `-schema-location=${l}`),
+    "-",
+  ];
+  let out: string;
+  try {
+    out = execFileSync(kubeconform, args, {
+      input: manifests,
+      encoding: "utf8",
+      env: offlineEnv(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const e = err as Error & { stdout?: string; stderr?: string };
+    throw new Error(`kubeconform rejected the manifests: ${e.stdout || ""}${e.stderr || ""}${e.stdout || e.stderr ? "" : e.message}`);
+  }
+  const report = JSON.parse(out) as { resources: KubeconformResult[] };
+  const notValid = report.resources.filter((r) => r.status !== "statusValid");
+  if (notValid.length > 0) throw new Error(`kubeconform did not validate: ${JSON.stringify(notValid)}`);
+  return report.resources.map((r) => `${r.version} ${r.kind} ${r.name}`);
+}
+
+// Both validators, as the overlay check applies them.
+function validate(manifests: string): Obj[] {
+  const validated = kubectlDryRun(manifests);
+  const schemaValid = kubeconformValidate(manifests);
+  assert.deepEqual(
+    schemaValid.sort(),
+    validated.map((o) => `${o["apiVersion"]} ${o["kind"]} ${o["metadata"]?.["name"]}`).sort(),
+    "kubeconform schema-validated exactly the objects kubectl decoded",
+  );
+  return validated;
 }
 
 function identity(o: Obj): string {
@@ -199,6 +269,7 @@ test("Dockerfile builds on Node 24 with tsc and runs node dist/main.js", () => {
 });
 
 test("every kustomize overlay renders and passes kubectl client-side dry-run validation", () => {
+  // Also schema-validates every rendered object (kubeconformValidate).
   const dirs = overlays();
   assert.ok(dirs.includes("deploy"), `expected deploy/ among the overlays, found ${JSON.stringify(dirs)}`);
 
@@ -219,23 +290,60 @@ test("every kustomize overlay renders and passes kubectl client-side dry-run val
 
     let validated: Obj[];
     try {
-      validated = kubectlDryRun(rendered);
+      validated = validate(rendered);
     } catch (err) {
-      assert.fail(`kubectl client-side dry-run rejected ${dir}: ${(err as Error).message}`);
+      assert.fail(`validation rejected ${dir}: ${(err as Error).message}`);
     }
     // kubectl accepted every rendered object, one for one.
     assert.deepEqual(validated.map(identity).sort(), objs.map(identity).sort(), `${dir}: dry-run object set`);
   }
 });
 
-test("the kubectl client-side dry-run rejects an invalid manifest", () => {
-  // The same call accepts a valid object, so the rejections below come from
-  // validation and not from a missing or broken kubectl.
-  const ok = kubectlDryRun("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ok\n");
+test("the manifest validation rejects an invalid manifest", () => {
+  // The same call accepts valid objects, so the rejections below come from
+  // validation and not from a missing or broken tool.
+  const ok = validate("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: ok\n");
   assert.deepEqual(ok.map((o) => o["metadata"]?.["name"]), ["ok"]);
+  const deployment = (replicas: string) =>
+    [
+      "apiVersion: apps/v1",
+      "kind: Deployment",
+      "metadata:",
+      "  name: web",
+      "spec:",
+      `  replicas: ${replicas}`,
+      "  selector:",
+      "    matchLabels: {app: web}",
+      "  template:",
+      "    metadata:",
+      "      labels: {app: web}",
+      "    spec:",
+      "      containers:",
+      "        - name: web",
+      "          image: example.invalid/web:1",
+      "",
+    ].join("\n");
+  assert.deepEqual(validate(deployment("2")).map((o) => o["kind"]), ["Deployment"]);
+
   // A document kubectl cannot decode as a Kubernetes object (no kind) must
   // fail the check rather than pass silently.
-  assert.throws(() => kubectlDryRun("apiVersion: v1\nmetadata:\n  name: no-kind\n"));
+  assert.throws(() => validate("apiVersion: v1\nmetadata:\n  name: no-kind\n"));
   // A document that is not valid YAML must fail too.
-  assert.throws(() => kubectlDryRun("apiVersion: v1\nkind: ConfigMap\nmetadata: [unclosed\n"));
+  assert.throws(() => validate("apiVersion: v1\nkind: ConfigMap\nmetadata: [unclosed\n"));
+
+  // A schema-invalid object: kubectl's dry-run decodes it unstructured and
+  // accepts it, so the schema validation is what must reject it.
+  const badReplicas = deployment('"invalid"');
+  assert.deepEqual(kubectlDryRun(badReplicas).map((o) => o["spec"]?.["replicas"]), ["invalid"]);
+  assert.throws(() => validate(badReplicas), /replicas/);
+  // An unknown field fails strict validation.
+  assert.throws(
+    () => validate("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\nnotAField: 1\n"),
+    /notAField|additional/i,
+  );
+  // A kind with no schema fails rather than being skipped.
+  assert.throws(
+    () => validate("apiVersion: example.invalid/v1\nkind: Nothing\nmetadata:\n  name: x\n"),
+    /kubeconform/,
+  );
 });
