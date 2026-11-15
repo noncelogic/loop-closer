@@ -42,4 +42,5 @@ this repo applies it to a cluster; rollout is estate-side GitOps. There is no pu
 `tests/deploy/manifests.test.ts` renders it with `kustomize` (or `kubectl kustomize`),
 dry-runs it with `kubectl` and schema-validates it with `kubeconform` against pinned
 schemas checked in under `tests/deploy/schemas/` (no network fetch); CI installs all
-three tools, pinned (`.github/scripts/install-k8s-tools.sh`).
+three tools, pinned (`.github/scripts/install-k8s-tools.sh`). Why kubeconform rather than a
+kind server dry-run: `docs/decisions/manifest-schema-validator.md`.

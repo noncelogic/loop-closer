@@ -9,6 +9,10 @@
 // $KUSTOMIZE, $KUBECONFORM); see .github/workflows/ci.yml and
 // .github/scripts/install-k8s-tools.sh.
 //
+// LC-M3-MANIFEST-CHECK-b acceptance: the schema check, run offline, rejects a
+// wrongly typed field and a field the schema does not define, and passes the
+// repository's rendered manifests (docs/decisions/manifest-schema-validator.md).
+//
 // Renders with a real kustomize: $KUSTOMIZE if set, else `kustomize` on PATH,
 // else `kubectl kustomize`. Dry-runs with $KUBECTL if set, else `kubectl` on
 // PATH. Schema-validates with $KUBECONFORM if set, else `kubeconform` on PATH.
@@ -123,14 +127,21 @@ const SCHEMA_LOCATIONS = [
   join(SCHEMA_DIR, "crds", "{{ .Group }}", "{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json"),
 ];
 
-type KubeconformResult = { kind: string; name: string; version: string; status: string; msg: string };
+type KubeconformResult = {
+  kind: string;
+  name: string;
+  version: string;
+  status: string;
+  msg: string;
+  validationErrors?: { path: string; msg: string }[];
+};
 
-// Schema validation without an API server: kubeconform checks each object's
-// fields and types against its pinned schema (a Deployment with
-// `spec.replicas: "invalid"` fails here, though kubectl's dry-run accepts it).
-// Returns the identity of every object it found valid; throws with
-// kubeconform's findings when any object is invalid, errors, or is skipped.
-function kubeconformValidate(manifests: string): string[] {
+// Runs kubeconform, offline, over the manifests and returns its verdict on
+// every object (statusValid, statusInvalid, statusError, statusSkipped, ...).
+// kubeconform exits non-zero when any object is not valid but still prints
+// its JSON report; only a run with no parseable report (tool missing, crash)
+// throws here, so callers can tell a schema rejection from a broken tool.
+function kubeconformReport(manifests: string): KubeconformResult[] {
   const kubeconform = process.env["KUBECONFORM"] || "kubeconform";
   const args = [
     "-strict",
@@ -151,12 +162,25 @@ function kubeconformValidate(manifests: string): string[] {
     });
   } catch (err) {
     const e = err as Error & { stdout?: string; stderr?: string };
-    throw new Error(`kubeconform rejected the manifests: ${e.stdout || ""}${e.stderr || ""}${e.stdout || e.stderr ? "" : e.message}`);
+    try {
+      return (JSON.parse(e.stdout ?? "") as { resources: KubeconformResult[] }).resources;
+    } catch {
+      throw new Error(`kubeconform rejected the manifests: ${e.stdout || ""}${e.stderr || ""}${e.stdout || e.stderr ? "" : e.message}`);
+    }
   }
-  const report = JSON.parse(out) as { resources: KubeconformResult[] };
-  const notValid = report.resources.filter((r) => r.status !== "statusValid");
+  return (JSON.parse(out) as { resources: KubeconformResult[] }).resources;
+}
+
+// Schema validation without an API server: kubeconform checks each object's
+// fields and types against its pinned schema (a Deployment with
+// `spec.replicas: "invalid"` fails here, though kubectl's dry-run accepts it).
+// Returns the identity of every object it found valid; throws with
+// kubeconform's findings when any object is invalid, errors, or is skipped.
+function kubeconformValidate(manifests: string): string[] {
+  const resources = kubeconformReport(manifests);
+  const notValid = resources.filter((r) => r.status !== "statusValid");
   if (notValid.length > 0) throw new Error(`kubeconform did not validate: ${JSON.stringify(notValid)}`);
-  return report.resources.map((r) => `${r.version} ${r.kind} ${r.name}`);
+  return resources.map((r) => `${r.version} ${r.kind} ${r.name}`);
 }
 
 // Both validators, as the overlay check applies them.
@@ -355,6 +379,110 @@ test("the manifest validation rejects an invalid manifest", () => {
     () => validate("apiVersion: example.invalid/v1\nkind: Nothing\nmetadata:\n  name: x\n"),
     /kubeconform/,
   );
+});
+
+// LC-M3-MANIFEST-CHECK-b acceptance: the schema check itself, run offline.
+// Each case below runs kubeconform in offlineEnv() (no kubeconfig, no
+// in-cluster variables, every HTTP(S) request sent to a dead proxy) against
+// the vendored schemas only, and requires kubeconform's own verdict on the
+// object: statusInvalid for a schema violation, never statusError (which is
+// what a missing schema or a failed fetch would produce).
+
+// A minimal Deployment whose `spec` opens with the given line.
+function deploymentWith(specLine: string): string {
+  return [
+    "apiVersion: apps/v1",
+    "kind: Deployment",
+    "metadata:",
+    "  name: web",
+    "spec:",
+    `  ${specLine}`,
+    "  selector:",
+    "    matchLabels: {app: web}",
+    "  template:",
+    "    metadata:",
+    "      labels: {app: web}",
+    "    spec:",
+    "      containers:",
+    "        - name: web",
+    "          image: example.invalid/web:1",
+    "",
+  ].join("\n");
+}
+
+// The environment offlineEnv() gives a validator really has no cluster to
+// reach, no credential to read and no network route.
+function assertOffline(): void {
+  const env = offlineEnv();
+  assert.ok(env["KUBECONFIG"] && !existsSync(env["KUBECONFIG"]), "KUBECONFIG names no file");
+  assert.equal(env["KUBERNETES_SERVICE_HOST"], undefined);
+  assert.equal(env["KUBERNETES_SERVICE_PORT"], undefined);
+  for (const v of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) assert.equal(env[v], DEAD_PROXY, v);
+  for (const v of ["NO_PROXY", "no_proxy"]) assert.equal(env[v], undefined, v);
+}
+
+// kubeconform's single verdict on a one-object manifest.
+function verdict(manifest: string): KubeconformResult {
+  const resources = kubeconformReport(manifest);
+  assert.equal(resources.length, 1, `one verdict expected: ${JSON.stringify(resources)}`);
+  return resources[0]!;
+}
+
+test("rejects a Deployment whose spec.replicas is a string without cluster or network access", () => {
+  assertOffline();
+  // The same offline call passes a well-typed Deployment, so the rejection
+  // comes from the schema and not from a missing tool, schema or network.
+  assert.equal(verdict(deploymentWith("replicas: 2")).status, "statusValid");
+
+  const bad = deploymentWith('replicas: "invalid"');
+  // kubectl's offline dry-run alone lets it through.
+  assert.deepEqual(kubectlDryRun(bad).map((o) => o["spec"]?.["replicas"]), ["invalid"]);
+
+  const v = verdict(bad);
+  assert.equal(v.status, "statusInvalid", JSON.stringify(v));
+  assert.equal(v.kind, "Deployment");
+  // The finding names the field (neither the kind nor the name does).
+  assert.match(`${v.msg} ${JSON.stringify(v.validationErrors ?? [])}`, /replicas/, JSON.stringify(v));
+  // And the check as CI applies it fails.
+  assert.throws(() => validate(bad), /replicas/);
+});
+
+test("rejects a resource carrying a field its schema does not define", () => {
+  assertOffline();
+  // `spec.replica` (a misspelt `spec.replicas`) is not in the Deployment
+  // schema; strict mode rejects it rather than ignoring it.
+  const bad = deploymentWith("replica: 2");
+  const v = verdict(bad);
+  assert.equal(v.status, "statusInvalid", JSON.stringify(v));
+  assert.match(v.msg, /replica/, JSON.stringify(v));
+  assert.match(v.msg, /additional ?propert/i, JSON.stringify(v));
+  assert.throws(() => validate(bad), /replica/);
+
+  // The same holds for a top-level field on another kind.
+  const extra = verdict("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\nnotAField: 1\n");
+  assert.equal(extra.status, "statusInvalid", JSON.stringify(extra));
+  assert.match(extra.msg, /notAField/, JSON.stringify(extra));
+});
+
+test("passes the repository's rendered manifests with no kubeconfig and no network", () => {
+  assertOffline();
+  const dirs = overlays();
+  assert.ok(dirs.includes("deploy"), `expected deploy/ among the overlays, found ${JSON.stringify(dirs)}`);
+  for (const dir of dirs) {
+    const rendered = kustomizeBuild(join(repoRoot, dir));
+    const objs = parseAllDocuments(rendered)
+      .map((doc) => doc.toJS() as Obj | null)
+      .filter((o): o is Obj => o !== null);
+    assert.ok(objs.length > 0, `${dir} renders no objects`);
+    const resources = kubeconformReport(rendered);
+    const notValid = resources.filter((r) => r.status !== "statusValid");
+    assert.deepEqual(notValid, [], `${dir}: kubeconform did not validate every object`);
+    assert.deepEqual(
+      resources.map((r) => `${r.version} ${r.kind} ${r.name}`).sort(),
+      objs.map((o) => `${o["apiVersion"]} ${o["kind"]} ${o["metadata"]?.["name"]}`).sort(),
+      `${dir}: kubeconform validated every rendered object`,
+    );
+  }
 });
 
 // Every $ref value anywhere in a JSON document.
