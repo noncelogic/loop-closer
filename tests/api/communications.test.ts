@@ -12,7 +12,15 @@ import type { Authority, InMemoryGraphStore } from "../../src/kernel/index.ts";
 import { createServer } from "../../src/server.ts";
 import { experiment, experimentProposal, joe, newKernel, repoRuns, resultsLand } from "../kernel/fixtures.ts";
 
-const KEY = "test-key-juno";
+// One key per principal: Joe, the sender, and agents that must not send.
+const KEYS = new Map([
+  ["agent:juno", "test-key-juno"],
+  ["agent:sender", "test-key-sender"],
+  ["agent:chaser", "test-key-chaser"],
+  ["agent:drafter", "test-key-drafter"],
+  ["joe", "test-key-joe"],
+]);
+const KEY = KEYS.get("agent:juno")!;
 const api = createApiValidator();
 const ajv = createValidator();
 
@@ -23,7 +31,7 @@ let store: InMemoryGraphStore;
 before(async () => {
   const env = newKernel();
   store = env.store;
-  server = createServer({ kernel: env.kernel, apiKeys: new Map([["agent:juno", KEY]]) });
+  server = createServer({ kernel: env.kernel, apiKeys: KEYS });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -32,14 +40,14 @@ after(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
 type Obj = Record<string, any>;
 
-/** Calls an operation; both the request and the response are checked against the contract. */
-async function call(operationId: string, path: string, body: unknown): Promise<{ status: number; body: Obj }> {
+/** Calls an operation as `principal`; both the request and the response are checked against the contract. */
+async function call(operationId: string, path: string, body: unknown, principal = "agent:juno"): Promise<{ status: number; body: Obj }> {
   const validateRequest = api.request(operationId);
   assert.ok(validateRequest, `${operationId} has a request schema`);
   assert.ok(validateRequest(body), `request for ${operationId} should match the contract: ${api.ajv.errorsText(validateRequest.errors)}`);
   const res = await fetch(`${base}/v1${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${KEYS.get(principal)!}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   const parsed = (await res.json()) as Obj;
@@ -116,7 +124,7 @@ test("a send request under joe-approves-each waits for approval", async () => {
   const loopId = await openLoop();
   const comm = await draft(loopId);
 
-  const requested = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" });
+  const requested = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender");
   assert.equal(requested.status, 202);
   assert.deepEqual(requested.body, { communication_id: comm["id"], authority: "joe-approves-each", status: "pending_approval" });
 
@@ -127,7 +135,7 @@ test("a send request under joe-approves-each waits for approval", async () => {
   assert.equal((await store.read((tx) => tx.getSendRequest(comm["id"])))?.status, "pending_approval");
 
   // Asking again does not enqueue either.
-  const again = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" });
+  const again = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender");
   assert.equal(again.status, 409);
   assert.deepEqual(await outboxFor(comm["id"]), []);
 });
@@ -135,9 +143,9 @@ test("a send request under joe-approves-each waits for approval", async () => {
 test("an approved communication is enqueued once", async () => {
   const loopId = await openLoop();
   const comm = await draft(loopId);
-  assert.equal((await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" })).status, 202);
+  assert.equal((await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender")).status, 202);
 
-  const approved = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" });
+  const approved = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" }, "joe");
   assert.equal(approved.status, 200);
   assert.equal(approved.body["communication_id"], comm["id"]);
   assert.equal(approved.body["status"], "released");
@@ -154,20 +162,20 @@ test("an approved communication is enqueued once", async () => {
   assert.equal(stored?.sent_under_authority, "joe-approves-each");
 
   // A second approval releases nothing more.
-  const twice = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" });
+  const twice = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" }, "joe");
   assert.equal(twice.status, 409);
   assert.equal((await outboxFor(comm["id"])).length, 1);
 });
 
 test("an approval of an unknown or unrequested communication enqueues nothing", async () => {
   const before = await store.read((tx) => tx.outbox().length);
-  const unknown = await call("approve_send", "/communications/lc_comm_nope/approve", { approver: "joe" });
+  const unknown = await call("approve_send", "/communications/lc_comm_nope/approve", { approver: "joe" }, "joe");
   assert.equal(unknown.status, 404);
 
   // A drafted communication nobody asked to send has no pending approval to release.
   const loopId = await openLoop();
   const comm = await draft(loopId);
-  const unrequested = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" });
+  const unrequested = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" }, "joe");
   assert.equal(unrequested.status, 409);
   assert.equal(await store.read((tx) => tx.outbox().length), before);
 });
@@ -176,7 +184,7 @@ test("a send request under autonomous authority enqueues the send", async () => 
   const loopId = await openLoop("autonomous");
   const comm = await draft(loopId);
 
-  const requested = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" });
+  const requested = await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender");
   assert.equal(requested.status, 202);
   assert.deepEqual(requested.body, { communication_id: comm["id"], authority: "autonomous", status: "enqueued" });
   const queued = await outboxFor(comm["id"]);
@@ -186,8 +194,8 @@ test("a send request under autonomous authority enqueues the send", async () => 
   assert.equal((await store.read((tx) => tx.getCommunication(comm["id"])))?.sent_under_authority, "autonomous");
 
   // Already enqueued: no approval to give and no second send.
-  assert.equal((await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" })).status, 409);
-  assert.equal((await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" })).status, 409);
+  assert.equal((await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" }, "joe")).status, 409);
+  assert.equal((await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender")).status, 409);
   assert.equal((await outboxFor(comm["id"])).length, 1);
 });
 
@@ -199,10 +207,55 @@ test("a send request is refused for a communication that is not this loop's outb
   const before = await store.read((tx) => tx.outbox().length);
 
   const send = (loop: string, communication_id: string) =>
-    call("request_send", `/loops/${loop}/send-requests`, { communication_id, actor: "agent:sender" });
+    call("request_send", `/loops/${loop}/send-requests`, { communication_id, actor: "agent:sender" }, "agent:sender");
   assert.equal((await send(loopId, inbound["id"])).status, 409);
   assert.equal((await send(loopId, elsewhere["id"])).status, 409);
   assert.equal((await send(loopId, "lc_comm_nope")).status, 404);
   assert.equal((await send("lc_loop_nope", elsewhere["id"])).status, 404);
   assert.equal(await store.read((tx) => tx.outbox().length), before);
+});
+
+test("only the sender may request a send: chaser and drafter are refused and nothing is enqueued", async () => {
+  for (const authority of ["autonomous", "joe-approves-each"] as const) {
+    const loopId = await openLoop(authority);
+    const comm = await draft(loopId);
+    const path = `/loops/${loopId}/send-requests`;
+    for (const principal of ["agent:chaser", "agent:drafter", "agent:juno"]) {
+      const refused = await call("request_send", path, { communication_id: comm["id"], actor: principal }, principal);
+      assert.equal(refused.status, 403, `${principal} under ${authority}`);
+      assert.equal(refused.body["error"], "forbidden");
+    }
+    // The sender's name in the body does not lend another key its scope.
+    assert.equal((await call("request_send", path, { communication_id: comm["id"], actor: "agent:sender" }, "agent:chaser")).status, 403);
+    // Nor may the sender act under another actor's name.
+    assert.equal((await call("request_send", path, { communication_id: comm["id"], actor: "agent:drafter" }, "agent:sender")).status, 403);
+    assert.deepEqual(await outboxFor(comm["id"]), []);
+    assert.equal(await store.read((tx) => tx.getSendRequest(comm["id"])), undefined);
+
+    // The authorised sender still gets through.
+    const allowed = await call("request_send", path, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender");
+    assert.equal(allowed.status, 202);
+    assert.equal(allowed.body["status"], authority === "autonomous" ? "enqueued" : "pending_approval");
+    assert.equal((await outboxFor(comm["id"])).length, authority === "autonomous" ? 1 : 0);
+  }
+});
+
+test("only Joe's own key approves a send; an agent naming Joe is refused and nothing is enqueued", async () => {
+  const loopId = await openLoop();
+  const comm = await draft(loopId);
+  assert.equal((await call("request_send", `/loops/${loopId}/send-requests`, { communication_id: comm["id"], actor: "agent:sender" }, "agent:sender")).status, 202);
+
+  const path = `/communications/${comm["id"]}/approve`;
+  for (const principal of ["agent:sender", "agent:chaser", "agent:drafter", "agent:juno"]) {
+    const impersonating = await call("approve_send", path, { approver: "joe" }, principal);
+    assert.equal(impersonating.status, 403, principal);
+    assert.equal(impersonating.body["error"], "forbidden");
+  }
+  // Joe's key approving under another name is refused too: the approver is the authenticated principal.
+  assert.equal((await call("approve_send", path, { approver: "agent:sender" }, "joe")).status, 403);
+  assert.deepEqual(await outboxFor(comm["id"]), []);
+  assert.equal((await store.read((tx) => tx.getSendRequest(comm["id"])))?.status, "pending_approval");
+
+  assert.equal((await call("approve_send", path, { approver: "joe" }, "joe")).status, 200);
+  assert.equal((await outboxFor(comm["id"])).length, 1);
 });
