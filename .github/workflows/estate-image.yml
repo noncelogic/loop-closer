@@ -34,7 +34,10 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: [self-hosted, linux]
+    # passband-ci is the estate's ARC scale set on AKS; it carries
+    # [passband-ci, aks, self-hosted] and no `linux` label, so asking for
+    # `linux` leaves the job queued forever.
+    runs-on: [self-hosted, passband-ci]
     timeout-minutes: 20
     steps:
       - name: Check estate registry configuration
