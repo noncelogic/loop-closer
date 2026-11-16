@@ -45,11 +45,19 @@ export class Replica {
     this.#compose(["down", "--volumes", "--remove-orphans"], { inherit: true });
   }
 
+  /** Host-side connection URL for a database on the replica (published on an ephemeral port). */
+  databaseUrl(database = "loopcloser"): string {
+    const published = this.#compose(["port", "postgres", "5432"]).trim().split("\n")[0] ?? "";
+    const port = published.slice(published.lastIndexOf(":") + 1);
+    return `postgres://loopcloser:loopcloser@127.0.0.1:${port}/${database}`;
+  }
+
   /** Runs SQL as the database owner (the migration role); returns unaligned tuples-only output. */
-  psql(sql: string, opts: { role?: string } = {}): string {
+  psql(sql: string, opts: { role?: string; database?: string } = {}): string {
     const script = opts.role ? `SET ROLE ${opts.role};\n${sql}` : sql;
+    const database = opts.database ?? "loopcloser";
     return this.#compose(
-      ["exec", "-T", "postgres", "psql", "-U", "loopcloser", "-d", "loopcloser", "-v", "ON_ERROR_STOP=1", "-qtA", "-f", "-"],
+      ["exec", "-T", "postgres", "psql", "-U", "loopcloser", "-d", database, "-v", "ON_ERROR_STOP=1", "-qtA", "-f", "-"],
       { input: script },
     ).trim();
   }

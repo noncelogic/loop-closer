@@ -32,6 +32,19 @@ once each, in order, recorded in `schema_migrations`). The service connects as t
 `loopcloser_app` role, which can append to and read `ledger_events` but cannot update or delete
 them. `tests/schema/` proves the schema on a fresh Compose replica.
 
+The image ships those files and a migrate entrypoint that applies them:
+
+```sh
+docker run --rm -e DATABASE_URL=postgres://loopcloser:…@host:5432/loopcloser \
+  ghcr.io/noncelogic/loop-closer node dist/migrate.js    # or `npm run migrate` after a build
+```
+
+It applies only the versions `schema_migrations` does not record, in filename order, each in one
+transaction that also records its version, and stops at the first failure (rolled back, left
+unrecorded, later files not run) with a nonzero exit. It refuses, before applying anything, a
+database that holds loop tables but no `schema_migrations`. `MIGRATIONS_DIR` overrides the
+directory (default `db/migrations` under the app root). `tests/schema/migrate.test.ts` covers it.
+
 ## Deployment
 
 `Dockerfile` builds the service image; CI (job `image`) publishes it to
