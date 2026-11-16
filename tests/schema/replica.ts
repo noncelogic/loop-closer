@@ -45,6 +45,14 @@ export class Replica {
     this.#compose(["down", "--volumes", "--remove-orphans"], { inherit: true });
   }
 
+  /** The host port the replica's Postgres is published on (ephemeral). */
+  hostPort(): number {
+    const out = this.#compose(["port", "postgres", "5432"]).trim();
+    const port = Number(out.slice(out.lastIndexOf(":") + 1));
+    if (!Number.isInteger(port) || port <= 0) throw new Error(`no published port for postgres: ${JSON.stringify(out)}`);
+    return port;
+  }
+
   /** Runs SQL as the database owner (the migration role); returns unaligned tuples-only output. */
   psql(sql: string, opts: { role?: string } = {}): string {
     const script = opts.role ? `SET ROLE ${opts.role};\n${sql}` : sql;
