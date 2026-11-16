@@ -35,7 +35,10 @@ them. `tests/schema/` proves the schema on a fresh Compose replica.
 ## Deployment
 
 `Dockerfile` builds the service image; CI (job `image`) publishes it to
-`ghcr.io/noncelogic/loop-closer` on pushes to `main`. `deploy/` holds the kustomize
+`ghcr.io/noncelogic/loop-closer` on pushes to `main`. On the same pushes,
+`.github/workflows/estate-image.yml` builds it on the estate's self-hosted runners and pushes
+`<estate registry>/loopcloser:sha-<commit>` to the registry aks-obs-01 pulls from, with a push
+credential read from OpenBao via GitHub OIDC (never a GitHub secret). `deploy/` holds the kustomize
 package for aks-obs-01 (namespace `loop-closer`, CNPG cluster `loopcloser-db`, API
 Deployment/Service, suspended per-minute tick CronJob, OpenBao ExternalSecrets). Nothing in
 this repo applies it to a cluster; rollout is estate-side GitOps. There is no public ingress.
