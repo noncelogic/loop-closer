@@ -5,10 +5,12 @@
 //
 // The credential comes from runtime configuration (a mounted secret file, as
 // the API keys are; src/config.ts) and is only ever placed in the request's
-// Authorization header. Every error the reader raises is built from fixed text
-// plus the HTTP status and is scrubbed of the credential, so a failed read can
-// be recorded as a sensor error or logged without leaking it, even when the
-// portal echoes the credential back in its response.
+// Authorization header. A successful response is redacted of the credential
+// before it is parsed, so no observation (and so no ledger payload) carries it,
+// even when the portal echoes it back in a listing's text. Every error the
+// reader raises is built from fixed text plus the HTTP status and is scrubbed
+// of the credential, so a failed read can be recorded as a sensor error or
+// logged without leaking it, even when the portal echoes the credential back.
 import { existsSync, readFileSync } from "node:fs";
 import type { PortalObservation } from "./sources.ts";
 
@@ -123,7 +125,9 @@ export class AnthropicPortalReader {
     } catch {
       throw new PortalReadError("format", "anthropic portal response is not JSON", status);
     }
-    return parseListings(body);
+    // A successful body may still echo the credential (in a listing's name, say);
+    // redact it before anything is parsed, so no observation, field or error carries it.
+    return parseListings(redacted(body, this.#credential));
   }
 
   /** Any error leaving the reader is a PortalReadError with the credential removed. */
@@ -155,6 +159,16 @@ export function parseListings(body: unknown): PortalObservation[] {
     }
     return { subject: slug, status, fields };
   });
+}
+
+/** `value` with every occurrence of `secret` in its strings replaced by "[redacted]". */
+function redacted(value: unknown, secret: string): unknown {
+  if (typeof value === "string") return value.replaceAll(secret, "[redacted]");
+  if (Array.isArray(value)) return value.map((v) => redacted(v, secret));
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redacted(v, secret)]));
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

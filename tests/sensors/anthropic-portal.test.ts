@@ -117,6 +117,32 @@ test("an authentication failure from the fixture surfaces as a read failure with
   assert.ok(!JSON.stringify(ledger).includes(CREDENTIAL));
 });
 
+test("a successful response that echoes the credential yields observations with the credential redacted", async () => {
+  const { fetch } = replay(fixture("listings-echo-credential"));
+  const reader = new AnthropicPortalReader({ url: PORTAL_URL, credential: CREDENTIAL, fetch });
+
+  const observations = await reader.read();
+
+  assert.deepEqual(observations, [
+    { subject: "rove-connector", status: "in_review", fields: { name: "Rove connector ([redacted])", version: "1.2.0-[redacted]", updated_at: "2026-11-15T18:04:11Z" } },
+    { subject: "ledger-[redacted]", status: "live:[redacted]", fields: { name: "[redacted]", version: "0.4.1", updated_at: "2026-11-02T10:22:40Z" } },
+  ]);
+  assert.ok(!JSON.stringify(observations).includes(CREDENTIAL));
+
+  // Through the sensor: the observations become ledger event payloads, none carrying the credential.
+  const env = newKernel();
+  const framework = new SensorFramework(env.kernel, env.store);
+  const source = await PortalReadSource.register(framework, env.store, ANTHROPIC_LISTINGS_SENSOR, {
+    event_type: LISTING_STATUS_CHANGED,
+    read: reader.read,
+  });
+  const report = await source.poll();
+  assert.equal(report.heartbeat, true);
+  assert.ok(!JSON.stringify(report).includes(CREDENTIAL));
+  const ledger = await env.store.read((tx) => tx.ledger());
+  assert.ok(!JSON.stringify(ledger).includes(CREDENTIAL));
+});
+
 test("a malformed portal response is a read failure, not an empty listing set", async () => {
   const fetch = async () => new Response(JSON.stringify({ listings: [{ slug: "x" }] }), { status: 200 });
   const reader = new AnthropicPortalReader({ url: PORTAL_URL, credential: CREDENTIAL, fetch });
