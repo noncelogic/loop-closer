@@ -4,8 +4,9 @@
 // - CalendarSource: time itself. Each poll fires every due calendar When in
 //   the graph (idempotency-keyed by its scheduled slot, as the timer tick does)
 //   and advances its next_fire_at.
-// - PortalReadSource: a scheduled read of a portal with no API (the Anthropic
-//   listings check is the canonical instance). Each poll reads the portal,
+// - PortalReadSource: a scheduled read of a source with no API (the Anthropic
+//   listings check, a read of the public directory pages, is the canonical
+//   instance; public-listing.ts). Each poll reads the portal,
 //   compares every subject's status with the last one this sensor recorded in
 //   the ledger, and emits a fire_event per change.
 //
@@ -24,7 +25,7 @@ export const CALENDAR_SENSOR: SensorDefinition = {
   heartbeat: { interval_seconds: 60, grace_seconds: 120 },
 };
 
-/** No listings API exists: the sensor reads the portal on a schedule. */
+/** No listings API exists: the sensor reads the public directory pages on a schedule, with no credential. */
 export const ANTHROPIC_LISTINGS_SENSOR: SensorDefinition = {
   id: "anthropic_listings",
   source_binding: { source: "anthropic_listings", mechanism: "poll" },
