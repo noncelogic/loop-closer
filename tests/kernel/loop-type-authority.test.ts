@@ -171,3 +171,22 @@ test("with no registered owner receivers a factory-notification send is refused"
   );
   assert.deepEqual(await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id)), []);
 });
+
+test("a loop whose type has a policy keeps both the policy and its key-result reference", async () => {
+  const { kernel } = newKernel(OWNER_RECEIVERS);
+  const policy = LOOP_TYPE_POLICIES.find((p) => p.loop_type === "factory-notification");
+  assert.ok(policy);
+  const what = { ...experiment, id: "lc_what_notify_kr" };
+  const key_result_ref = { system: "plane", id: "CP-OWNER-1-KR2" };
+  const proposed = await kernel.proposeLoop({
+    ...experimentProposal({ loop_type: "factory-notification", nodes: [joe, what, repoRuns, resultsLand], edges: [] }),
+    key_result_ref,
+  });
+  assertValid("loop", proposed.loop);
+  assert.equal(proposed.loop.authority, "autonomous");
+  assert.deepEqual(proposed.loop.policy_refs.escalation, { id: policy.escalation.id, version: policy.escalation.version });
+  assert.deepEqual(proposed.loop.key_result_ref, key_result_ref);
+  await kernel.acceptLoop(proposed.loop.id, { acceptor: "joe" });
+  const { loops } = await kernel.openLoops({ key_result_ref });
+  assert.deepEqual(loops.map((l) => l.loop.id), [proposed.loop.id]);
+});

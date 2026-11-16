@@ -225,14 +225,10 @@ export class Kernel {
         opened_at: null,
         closed_at: null,
         close_reason: null,
-<<<<<<< HEAD
-        policy_refs: structuredClone(this.#policyRefs),
+        policy_refs: policyRefs,
         ...(input.key_result_ref === undefined
           ? {}
           : { key_result_ref: { system: input.key_result_ref.system, id: input.key_result_ref.id } }),
-=======
-        policy_refs: policyRefs,
->>>>>>> origin/main
       };
       this.#check("loop", loop, "bad_request");
       tx.putLoop(loop);
