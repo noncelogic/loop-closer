@@ -322,7 +322,8 @@ export class Kernel {
 
   /**
    * fire_event: records the firing of a When (by id, or every event-When bound
-   * to event_type + source) as one when_fired ledger event, then applies the
+   * to event_type + source; with a subject, only those whose binding names exactly
+   * that subject -- a When naming no subject does not hear subject changes) as one when_fired ledger event, then applies the
    * transitions the firing causes on armed loops (see whatFiresNext). A
    * replayed idempotency key applies once. Workflow runs arrive with templates.
    */
@@ -343,12 +344,16 @@ export class Kernel {
       } else {
         whens = (await tx.listNodes()).filter((n) => {
           const a = n.attributes;
-          const binding = a["source_binding"] as { source?: unknown } | undefined;
+          const binding = a["source_binding"] as { source?: unknown; config?: Record<string, unknown> } | undefined;
+          const target = binding?.config?.["subject"];
           return n.kind === "when" && n.status === "active" && a["when_type"] === "event" &&
-            a["event_type"] === input.event_type && binding?.source === input.source;
+            a["event_type"] === input.event_type && binding?.source === input.source &&
+            (input.subject === undefined || target === input.subject);
         });
-        if (whens.length === 0)
-          throw new KernelError("not_found", `no When is bound to event ${input.event_type} from ${input.source}`);
+        if (whens.length === 0) {
+          const about = input.subject === undefined ? "" : ` about ${input.subject}`;
+          throw new KernelError("not_found", `no When is bound to event ${input.event_type} from ${input.source}${about}`);
+        }
       }
 
       const at = this.#at();

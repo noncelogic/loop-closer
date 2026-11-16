@@ -62,7 +62,7 @@ const listingStatusChanged: Node = {
   attributes: {
     when_type: "event",
     event_type: LISTING_STATUS_CHANGED,
-    source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll" },
+    source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll", config: { subject: "rove-connector" } },
     fired_at: null,
     fire_count: 0,
   },
@@ -225,6 +225,106 @@ test("calendar and portal-read sources each drive a fire_event through the frame
     const missed = await framework.checkHeartbeats();
     assert.deepEqual(missed.map((m) => m.sensor_id), ["anthropic_listings"]);
   });
+});
+
+// LC-SENSE-LISTING-ROUTE: each directory listing is its own loop (SPEC B2.3), so
+// a When names the listing it watches in source_binding.config.subject and a
+// change to one listing fires only that listing's When.
+function listingWhen(id: string, slug: string): Node {
+  return {
+    ...listingStatusChanged,
+    id,
+    attributes: {
+      ...listingStatusChanged.attributes,
+      source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll", config: { subject: slug } },
+    },
+  };
+}
+
+const connectorWhen = listingWhen("lc_when_rove_connector_status", "rove-connector");
+const pluginWhen = listingWhen("lc_when_rove_plugin_status", "rove-plugin");
+const pluginListing: Node = { ...listing, id: "lc_what_rove_plugin_listing", attributes: { what_type: "artifact", title: "Rove plugin listing" } };
+
+async function twoListings() {
+  const env = newKernel();
+  const { now, advance } = clock(env);
+  const connector = await waitingLoop(env, listing, connectorWhen, "connector");
+  const plugin = await waitingLoop(env, pluginListing, pluginWhen, "plugin");
+  let page: PortalObservation[] = [];
+  const framework = new SensorFramework(env.kernel, env.store, { now });
+  const listings = await PortalReadSource.register(framework, env.store, ANTHROPIC_LISTINGS_SENSOR, {
+    event_type: LISTING_STATUS_CHANGED,
+    read: async () => page,
+  });
+  return { env, advance, connector, plugin, listings, setPage: (p: PortalObservation[]) => (page = p) };
+}
+
+const fireCount = async (env: ReturnType<typeof newKernel>, id: string) =>
+  (await env.store.read((tx) => tx.getNode(id)))?.attributes["fire_count"];
+
+test("with two listings bound to two Whens, a status change on one listing fires only its own When", async () => {
+  const { env, advance, connector, plugin, listings, setPage } = await twoListings();
+  setPage([
+    { subject: "rove-connector", status: "in_review" },
+    { subject: "rove-plugin", status: "scanning" },
+  ]);
+  const first = await listings.poll();
+  assert.deepEqual(first.changes.map((c) => [c.subject, c.to]), [["rove-connector", "in_review"], ["rove-plugin", "scanning"]]);
+  assert.deepEqual(first.unbound, []);
+  await connector.wait();
+  await plugin.wait();
+
+  advance(6 * 3600);
+  setPage([
+    { subject: "rove-connector", status: "live" },
+    { subject: "rove-plugin", status: "scanning" },
+  ]);
+  const live = await listings.poll();
+  assert.equal(live.changes.length, 1);
+  const [change] = live.changes;
+  assert.ok(change);
+  assert.equal(change.subject, "rove-connector");
+  const event = (await env.store.read((tx) => tx.ledger())).find((e) => e.id === change.event_id);
+  assert.ok(event);
+  assertValid("ledger-event", event);
+  assert.deepEqual(event.payload["when_ids"], [connectorWhen.id]);
+  assert.deepEqual(event.subject_ids, [connectorWhen.id, connector.loopId]);
+  assert.equal(await fireCount(env, connectorWhen.id), 2);
+  assert.equal(await fireCount(env, pluginWhen.id), 1);
+  assert.equal((await env.kernel.getLoop(connector.loopId)).state, "open");
+  assert.equal((await env.kernel.getLoop(plugin.loopId)).state, "waiting");
+});
+
+test("a change on a listing no When is bound to is reported unbound and fires nothing", async () => {
+  const { env, plugin, connector, listings, setPage } = await twoListings();
+  // A listing When that names no listing at all must not hear this change either.
+  const subjectless: Node = {
+    ...listingStatusChanged,
+    id: "lc_when_listing_no_subject",
+    attributes: {
+      ...listingStatusChanged.attributes,
+      source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll" },
+    },
+  };
+  const skillListing: Node = { ...listing, id: "lc_what_rove_skill_listing", attributes: { what_type: "artifact", title: "Rove skill listing" } };
+  const unnamed = await waitingLoop(env, skillListing, subjectless, "unnamed");
+  await connector.wait();
+  await plugin.wait();
+  await unnamed.wait();
+  const before = (await env.store.read((tx) => tx.ledger())).length;
+  setPage([{ subject: "rove-skill", status: "scanning" }]);
+  const report = await listings.poll();
+  assert.deepEqual(report.changes, []);
+  assert.deepEqual(report.unbound, [{ subject: "rove-skill", from: null, to: "scanning" }]);
+  assert.equal(report.heartbeat, true);
+  const after = await env.store.read((tx) => tx.ledger());
+  assert.deepEqual(after.slice(before).filter((e) => e.event_type === "when_fired" && e.payload["event_type"] === LISTING_STATUS_CHANGED), []);
+  assert.equal(await fireCount(env, connectorWhen.id), 0);
+  assert.equal(await fireCount(env, pluginWhen.id), 0);
+  assert.equal(await fireCount(env, subjectless.id), 0);
+  assert.equal((await env.kernel.getLoop(connector.loopId)).state, "waiting");
+  assert.equal((await env.kernel.getLoop(plugin.loopId)).state, "waiting");
+  assert.equal((await env.kernel.getLoop(unnamed.loopId)).state, "waiting");
 });
 
 // LC-SENSE-PUBLIC-LISTING acceptance: the listings sensor reads each tracked
