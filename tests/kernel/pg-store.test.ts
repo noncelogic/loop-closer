@@ -136,16 +136,34 @@ test("two concurrent transitions of one loop from the same state through indepen
   const { loop } = await setup.proposeLoop(experimentProposal());
   const { ledger_event: accepted } = await setup.acceptLoop(loop.id, { acceptor: "joe" });
 
-  // Both transactions read the loop before either commits, unless the store
-  // makes the second wait for the first: each waits after getLoop for the
-  // other to have read it too, giving up after a short while.
+  // The first transaction to read the loop holds its transaction open until
+  // the second has either read the loop too (the store does not lock it) or
+  // is observably waiting on a lock held by the first, idle-in-transaction,
+  // connection. Only then does the first go on; a missed deadline fails.
+  const observer = new pg.Pool({ connectionString: db.databaseUrl(database), max: 1 });
+  pools.push(observer);
+  const blockedByHolder = async (): Promise<boolean> =>
+    Number(
+      (
+        await observer.query(
+          `SELECT count(*) AS n FROM pg_stat_activity w
+             JOIN pg_stat_activity h ON h.pid = ANY(pg_blocking_pids(w.pid))
+            WHERE w.datname = $1 AND w.wait_event_type = 'Lock' AND h.state = 'idle in transaction'`,
+          [database],
+        )
+      ).rows[0].n,
+    ) > 0;
   let arrived = 0;
-  let release!: () => void;
-  const bothRead = new Promise<void>((resolve) => (release = resolve));
+  const released: string[] = [];
   const meet = async (method: keyof GraphTx): Promise<void> => {
-    if (method !== "getLoop") return;
-    if (++arrived === 2) release();
-    await Promise.race([bothRead, new Promise((resolve) => setTimeout(resolve, 500))]);
+    if (method !== "getLoop" || ++arrived !== 1) return;
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if (arrived >= 2) return void released.push("second read the loop");
+      if (await blockedByHolder()) return void released.push("second blocked by the first");
+      if (Date.now() > deadline) throw new Error("second transaction neither read the loop nor blocked on the first within 30s");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   };
   const racers = ["a", "b"].map((name) =>
     new Kernel(new HookedStore(newStore(database), meet)).transition(loop.id, {
@@ -159,7 +177,8 @@ test("two concurrent transitions of one loop from the same state through indepen
 
   const applied = outcomes.filter((o) => o.status === "fulfilled");
   const refused = outcomes.filter((o): o is PromiseRejectedResult => o.status === "rejected");
-  assert.equal(applied.length, 1, `exactly one transition applies: ${JSON.stringify(outcomes)}`);
+  assert.equal(released.length, 1, `the first transaction was held for the second: ${JSON.stringify(outcomes)}`);
+  assert.equal(applied.length, 1, `exactly one transition applies (${released[0]}): ${JSON.stringify(outcomes)}`);
   assert.equal(refused.length, 1);
   assert.ok(refused[0]!.reason instanceof KernelError && refused[0]!.reason.code === "conflict", String(refused[0]!.reason));
 
