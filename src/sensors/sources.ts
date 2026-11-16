@@ -7,7 +7,9 @@
 // - PortalReadSource: a scheduled read of a portal with no API (the Anthropic
 //   listings check is the canonical instance). Each poll reads the portal,
 //   compares every subject's status with the last one this sensor recorded in
-//   the ledger, and emits a fire_event per change.
+//   the ledger, and emits a fire_event per change. A When names the subject it
+//   watches in source_binding.config.subject, so a change fires only that
+//   subject's When (a When naming no subject still hears every change).
 //
 // Every successful poll heartbeats, whether or not the world changed. A poll
 // that cannot see the world (a failed portal read) does not, so the framework
@@ -147,7 +149,10 @@ export interface PortalObservation {
 }
 
 export interface PortalReadConfig {
-  /** Event type emitted on a status change; Whens bind to it from the sensor's source. */
+  /**
+   * Event type emitted on a status change; Whens bind to it from the sensor's
+   * source, and to one subject via source_binding.config.subject.
+   */
   event_type: string;
   /** The scheduled read. Throwing means the sensor could not see the portal. */
   read: () => Promise<PortalObservation[]>;
@@ -209,6 +214,8 @@ export class PortalReadSource {
       try {
         const result = await this.sensor.emit({
           event_type: this.#config.event_type,
+          // Each listing is its own loop: only the When bound to this subject fires.
+          subject: obs.subject,
           // Keyed by the change it follows, so a status that later recurs is a new change.
           idempotency_key: `${this.sensor.id}:${obs.subject}:${last?.event_id ?? "first"}:${obs.status}`,
           payload,

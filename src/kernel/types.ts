@@ -115,7 +115,18 @@ export interface TransitionInput {
 
 export type FireEventInput =
   | { when_id: string; idempotency_key: string; payload?: Record<string, unknown>; actor?: string }
-  | { event_type: string; source: string; payload: Record<string, unknown>; idempotency_key: string; actor?: string };
+  | {
+      event_type: string;
+      source: string;
+      payload: Record<string, unknown>;
+      idempotency_key: string;
+      actor?: string;
+      /**
+       * The one thing the change is about (e.g. a listing slug). A When whose
+       * source_binding.config.subject names a different subject does not fire.
+       */
+      subject?: string;
+    };
 
 export interface OpenLoopsFilter {
   accountable_who_id?: string;

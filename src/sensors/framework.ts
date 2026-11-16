@@ -49,6 +49,8 @@ export interface EmitInput {
   /** Unique per outside change (e.g. `ci:run:42`): redelivery applies once. */
   idempotency_key: string;
   payload?: Record<string, unknown>;
+  /** What the change is about; Whens bound to another subject (source_binding.config.subject) do not fire. */
+  subject?: string;
 }
 
 export interface MissedHeartbeat {
@@ -90,7 +92,7 @@ export class Sensor {
     this.missed_heartbeat_when_id = missedHeartbeatWhenId(def.id);
   }
 
-  /** Turns an outside change into a fire_event on every When bound to event_type from this sensor's source. */
+  /** Turns an outside change into a fire_event on every When bound to event_type from this sensor's source (and to input.subject, when given). */
   emit(input: EmitInput): Promise<FireEventResult> {
     return this.#kernel.fireEvent({
       event_type: input.event_type,
@@ -98,6 +100,7 @@ export class Sensor {
       payload: input.payload ?? {},
       idempotency_key: input.idempotency_key,
       actor: this.actor,
+      ...(input.subject === undefined ? {} : { subject: input.subject }),
     });
   }
 
