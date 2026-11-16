@@ -10,8 +10,13 @@ import {
   ANTHROPIC_LISTINGS_SENSOR,
   CalendarSource,
   LISTING_STATUS_CHANGED,
+  ListingReadError,
+  NOT_LISTED,
+  PUBLIC_LISTING_ENV,
   PortalReadSource,
+  PublicListingReader,
   SensorFramework,
+  loadPublicListingConfig,
   type PortalObservation,
 } from "../../src/sensors/index.ts";
 
@@ -220,4 +225,165 @@ test("calendar and portal-read sources each drive a fire_event through the frame
     const missed = await framework.checkHeartbeats();
     assert.deepEqual(missed.map((m) => m.sensor_id), ["anthropic_listings"]);
   });
+});
+
+// LC-SENSE-PUBLIC-LISTING acceptance: the listings sensor reads each tracked
+// listing's public directory page (URL per listing from configuration) with no
+// credential. The page fetch is replaced by a stub, so CI never reads the live
+// directory.
+const ROVE_PAGE = "https://directory.example.test/connectors/rove-connector";
+const PLUGIN_PAGE = "https://directory.example.test/plugins/rove-plugin";
+
+const ROVE_HTML = `<!doctype html>
+<html><head>
+<title>Rove connector | Directory</title>
+<meta property="og:title" content="Rove connector">
+<meta name="description" content="Plan trips &amp; share them with Rove.">
+<link rel="canonical" href="${ROVE_PAGE}">
+</head><body><h1>Rove connector</h1></body></html>`;
+
+interface SentRequest {
+  url: string;
+  headers: Headers;
+  init: RequestInit | undefined;
+}
+
+function directory(pages: Record<string, () => Response | Promise<Response>>) {
+  const requests: SentRequest[] = [];
+  const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
+    requests.push({ url: input, headers: new Headers(init?.headers), init });
+    const page = pages[input];
+    if (!page) return new Response("not found", { status: 404 });
+    return page();
+  };
+  return { fetch, requests };
+}
+
+const html = (body: string) => () => new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+
+test("a public listing page read records status and metadata fields with no credential configured", async () => {
+  // Configuration is a URL per listing and nothing else: there is no credential to configure.
+  const config = loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: JSON.stringify({ "rove-connector": ROVE_PAGE }) });
+  assert.deepEqual(config, { listings: [{ subject: "rove-connector", url: ROVE_PAGE }] });
+
+  const { fetch, requests } = directory({ [ROVE_PAGE]: html(ROVE_HTML) });
+  const reader = new PublicListingReader({ ...config!, fetch });
+
+  const observations = await reader.read();
+  assert.deepEqual(observations, [
+    {
+      subject: "rove-connector",
+      status: "live",
+      fields: { name: "Rove connector", description: "Plan trips & share them with Rove.", url: ROVE_PAGE },
+    },
+  ]);
+  // One anonymous GET of the configured public page: no credential, no cookie, no login.
+  assert.equal(requests.length, 1);
+  const [req] = requests;
+  assert.ok(req);
+  assert.equal(req.url, ROVE_PAGE);
+  assert.equal(req.init?.method ?? "GET", "GET");
+  assert.equal(req.headers.get("authorization"), null);
+  assert.equal(req.headers.get("cookie"), null);
+  assert.equal(req.init?.credentials, "omit");
+
+  // Through the sensor: the status and public fields land in the ledger as a fire_event.
+  const env = newKernel();
+  const { loopId, wait } = await waitingLoop(env, listing, listingStatusChanged, "public");
+  await wait();
+  const framework = new SensorFramework(env.kernel, env.store);
+  const source = await PortalReadSource.register(framework, env.store, ANTHROPIC_LISTINGS_SENSOR, {
+    event_type: LISTING_STATUS_CHANGED,
+    read: reader.read,
+  });
+  const report = await source.poll();
+  assert.equal(report.heartbeat, true);
+  assert.equal(report.changes.length, 1);
+  const [change] = report.changes;
+  assert.ok(change);
+  const event = (await env.store.read((tx) => tx.ledger())).find((e) => e.id === change.event_id);
+  assert.ok(event);
+  assertValid("ledger-event", event);
+  assert.deepEqual(event.payload["event_payload"], {
+    subject: "rove-connector",
+    from: null,
+    to: "live",
+    fields: { name: "Rove connector", description: "Plan trips & share them with Rove.", url: ROVE_PAGE },
+  });
+  assert.equal((await env.kernel.getLoop(loopId)).state, "open");
+});
+
+test("a listing absent from the public directory reads as not-listed", async () => {
+  const { fetch } = directory({ [ROVE_PAGE]: html(ROVE_HTML) });
+  const reader = new PublicListingReader({
+    listings: [
+      { subject: "rove-connector", url: ROVE_PAGE },
+      // Filed but still in review: its public page does not exist yet.
+      { subject: "rove-plugin", url: PLUGIN_PAGE },
+    ],
+    fetch,
+  });
+
+  const observations = await reader.read();
+  assert.deepEqual(
+    observations.map((o) => [o.subject, o.status]),
+    [
+      ["rove-connector", "live"],
+      ["rove-plugin", NOT_LISTED],
+    ],
+  );
+
+  // Not-listed is a status, not a failure: the sensor records it and heartbeats.
+  const env = newKernel();
+  const framework = new SensorFramework(env.kernel, env.store);
+  const source = await PortalReadSource.register(framework, env.store, ANTHROPIC_LISTINGS_SENSOR, {
+    event_type: LISTING_STATUS_CHANGED,
+    read: reader.read,
+  });
+  const report = await source.poll();
+  assert.equal(report.heartbeat, true);
+  assert.equal(report.error, undefined);
+  assert.deepEqual(report.unbound.map((u) => [u.subject, u.from, u.to]), [
+    ["rove-connector", null, "live"],
+    ["rove-plugin", null, NOT_LISTED],
+  ]);
+});
+
+test("an unreachable directory page fails the read without a heartbeat", async (t) => {
+  const failures: Record<string, () => Response | Promise<Response>> = {
+    "network error": () => {
+      throw new TypeError("fetch failed: getaddrinfo ENOTFOUND directory.example.test");
+    },
+    "server error": () => new Response("upstream down", { status: 503 }),
+  };
+  for (const [name, page] of Object.entries(failures)) {
+    await t.test(name, async () => {
+      const env = newKernel();
+      const { now, advance } = clock(env);
+      const { fetch } = directory({ [ROVE_PAGE]: html(ROVE_HTML), [PLUGIN_PAGE]: page });
+      const reader = new PublicListingReader({
+        listings: [
+          { subject: "rove-connector", url: ROVE_PAGE },
+          { subject: "rove-plugin", url: PLUGIN_PAGE },
+        ],
+        fetch,
+      });
+      await assert.rejects(reader.read(), (e: unknown) => e instanceof ListingReadError && e.message.includes("rove-plugin"));
+
+      const framework = new SensorFramework(env.kernel, env.store, { now });
+      const source = await PortalReadSource.register(framework, env.store, ANTHROPIC_LISTINGS_SENSOR, {
+        event_type: LISTING_STATUS_CHANGED,
+        read: reader.read,
+      });
+      const report = await source.poll();
+      assert.equal(report.heartbeat, false);
+      assert.match(report.error ?? "", /rove-plugin/);
+      // An unreachable page is not read as not-listed: nothing is recorded for either listing.
+      assert.deepEqual(report.changes, []);
+      assert.deepEqual(report.unbound, []);
+      advance(ANTHROPIC_LISTINGS_SENSOR.heartbeat.interval_seconds + (ANTHROPIC_LISTINGS_SENSOR.heartbeat.grace_seconds ?? 0) + 1);
+      const missed = await framework.checkHeartbeats();
+      assert.deepEqual(missed.map((m) => m.sensor_id), ["anthropic_listings"]);
+    });
+  }
 });
