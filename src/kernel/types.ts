@@ -42,6 +42,12 @@ export interface Edge {
   status: "active" | "superseded" | "retracted";
 }
 
+/** An opaque external reference to the key result a loop serves; Loop Closer never resolves it. */
+export interface KeyResultRef {
+  system: string;
+  id: string;
+}
+
 export interface Loop {
   id: string;
   name: string;
@@ -55,6 +61,8 @@ export interface Loop {
   closed_at: string | null;
   close_reason: CloseReason | null;
   policy_refs: { ageing: PolicyRef; escalation: PolicyRef };
+  /** Absent when the loop was proposed without one. */
+  key_result_ref?: KeyResultRef;
 }
 
 export interface LedgerEvent {
@@ -83,6 +91,7 @@ export interface ProposeLoopInput {
   nodes: (Node | { ref: string })[];
   edges: ProposedEdge[];
   closing_when_id?: string | undefined;
+  key_result_ref?: KeyResultRef | undefined;
   actor: string;
   rationale: string;
 }
@@ -113,6 +122,8 @@ export interface OpenLoopsFilter {
   loop_type?: string;
   state?: "proposed" | "open" | "waiting" | "chased";
   breaching_only?: boolean;
+  /** Only loops whose key_result_ref is exactly this system and id. */
+  key_result_ref?: KeyResultRef;
 }
 
 export interface LoopWithEvent {

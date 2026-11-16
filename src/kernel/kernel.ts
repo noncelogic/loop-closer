@@ -226,6 +226,9 @@ export class Kernel {
         closed_at: null,
         close_reason: null,
         policy_refs: policyRefs,
+        ...(input.key_result_ref === undefined
+          ? {}
+          : { key_result_ref: { system: input.key_result_ref.system, id: input.key_result_ref.id } }),
       };
       this.#check("loop", loop, "bad_request");
       tx.putLoop(loop);
@@ -496,6 +499,11 @@ export class Kernel {
         .filter((l) => filter.accountable_who_id === undefined || l.accountable_who_id === filter.accountable_who_id)
         .filter((l) => filter.loop_type === undefined || l.loop_type === filter.loop_type)
         .filter((l) => filter.state === undefined || l.state === filter.state)
+        .filter(
+          (l) =>
+            filter.key_result_ref === undefined ||
+            (l.key_result_ref?.system === filter.key_result_ref.system && l.key_result_ref.id === filter.key_result_ref.id),
+        )
         .map((loop): OpenLoop => {
           const since =
             loop.opened_at ??

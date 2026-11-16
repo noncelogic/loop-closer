@@ -42,7 +42,8 @@
         "ageing": { "$ref": "_common.schema.json#/$defs/policy_ref" },
         "escalation": { "$ref": "_common.schema.json#/$defs/policy_ref" }
       }
-    }
+    },
+    "key_result_ref": { "$ref": "#/$defs/key_result_ref" }
   },
   "allOf": [
     {
@@ -77,6 +78,16 @@
     "close_reason": {
       "description": "rejected = closed at intake by reject_loop.",
       "enum": ["abandoned", "superseded", "no-longer-applies", "rejected"]
+    },
+    "key_result_ref": {
+      "description": "Optional, opaque external reference to the key result the loop serves (system plus id). Loop Closer stores and returns it but never resolves it. Absent when the loop was proposed without one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "id"],
+      "properties": {
+        "system": { "type": "string", "minLength": 1, "description": "The system that owns the key result (e.g. plane)." },
+        "id": { "type": "string", "minLength": 1, "description": "The key result's id in that system." }
+      }
     }
   }
 }
