@@ -1,6 +1,6 @@
-// HTTP surface of the loopcloser service: GET /healthz, plus the loop
-// operations of the frozen API contract (contracts/openapi.json, served under
-// /v1) answered through the kernel. Every request body and query is checked
+// HTTP surface of the loopcloser service: GET /healthz, plus the loop and
+// communication operations of the frozen API contract (contracts/openapi.json,
+// served under /v1) answered through the kernel. Every request body and query is checked
 // against the contract before the kernel sees it, and every response body is
 // checked against the contract before it is sent: a response that would not
 // validate is replaced by a 500, never returned.
@@ -8,7 +8,18 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createApiValidator, type ApiValidator } from "./contracts/index.ts";
 import { InMemoryGraphStore, Kernel, KernelError } from "./kernel/index.ts";
-import type { FireEventInput, LedgerEvent, Loop, LoopState, OpenLoopsFilter, ProposeLoopInput, TransitionInput } from "./kernel/index.ts";
+import type {
+  ApproveSendInput,
+  FireEventInput,
+  LedgerEvent,
+  Loop,
+  LoopState,
+  OpenLoopsFilter,
+  ProposeLoopInput,
+  RecordCommunicationInput,
+  RequestSendInput,
+  TransitionInput,
+} from "./kernel/index.ts";
 
 export const SERVICE_NAME = "loopcloser";
 /** The contract's `servers[0].url`. */
@@ -41,8 +52,15 @@ interface Reply {
 
 interface Route {
   operationId: string;
+  /**
+   * The principals whose key carries this operation's scope (SPEC B2.6 actor
+   * separation); an operation without one is open to every agent key.
+   */
+  allow?: (principal: string) => boolean;
+  /** The request-body field naming who acts; it must be the authenticated principal. */
+  actorField?: string;
   method: "GET" | "POST";
-  /** Matches the path after the API prefix; captures the loop_id path parameter. */
+  /** Matches the path after the API prefix; captures the loop_id / communication_id path parameter. */
   pattern: RegExp;
   /** Query parameters the contract declares for the operation. */
   query?: readonly string[];
@@ -54,6 +72,18 @@ interface Context {
   query: Map<string, string>;
   body: unknown;
 }
+
+/**
+ * Joe's own principal (TECH-STACK §9: Joe's access is a key like any agent's,
+ * with full scope). Only Joe releases a send under joe-approves-each.
+ */
+export const JOE_PRINCIPAL = "joe";
+/** The sender role: the only agent that may request a send (chaser and drafter send nothing). */
+export const SENDER_ROLE = "sender";
+
+/** A principal's role: its name without the `agent:` prefix (secret entries are named by role, e.g. `sender`). */
+const role = (principal: string): string => principal.replace(/^agent:/, "");
+const isJoe = (principal: string): boolean => principal === JOE_PRINCIPAL;
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
 
@@ -171,6 +201,29 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
       method: "POST",
       pattern: /^\/events\/fire$/,
       handle: async ({ body }) => ({ status: 200, body: await kernel.fireEvent(body as FireEventInput) }),
+    },
+    {
+      operationId: "record_communication",
+      method: "POST",
+      pattern: /^\/communications$/,
+      handle: async ({ body }) => ({ status: 201, body: await kernel.recordCommunication(body as RecordCommunicationInput) }),
+    },
+    {
+      // Under joe-approves-each this only records a pending approval (kernel).
+      operationId: "request_send",
+      method: "POST",
+      allow: (principal) => isJoe(principal) || role(principal) === SENDER_ROLE,
+      actorField: "actor",
+      pattern: new RegExp(`^/loops/${id}/send-requests$`),
+      handle: async ({ params, body }) => ({ status: 202, body: await kernel.requestSend(params[0]!, body as RequestSendInput) }),
+    },
+    {
+      operationId: "approve_send",
+      method: "POST",
+      allow: isJoe,
+      actorField: "approver",
+      pattern: new RegExp(`^/communications/${id}/approve$`),
+      handle: async ({ params, body }) => ({ status: 200, body: await kernel.approveSend(params[0]!, body as ApproveSendInput) }),
     },
     {
       operationId: "open_loops",
@@ -292,8 +345,11 @@ export function createServer(options: ServerOptions = {}): Server {
     void (async (): Promise<Reply> => {
       try {
         // Every operation in the contract needs the agent key (global `security: agentKey`).
-        if (!authenticate(req.headers.authorization, keys))
+        const principal = authenticate(req.headers.authorization, keys);
+        if (principal === undefined)
           return { status: 401, body: { error: "unauthorized", message: "missing or unknown agent key" } };
+        if (op.allow && !op.allow(principal))
+          return { status: 403, body: { error: "forbidden", message: `${principal} lacks the scope for ${op.operationId}` } };
 
         const query = new Map<string, string>();
         for (const [name, value] of url.searchParams) {
@@ -309,6 +365,14 @@ export function createServer(options: ServerOptions = {}): Server {
           if (body === undefined) throw new HttpError(400, "bad_request", "a JSON request body is required");
           if (!validate(body))
             throw new HttpError(400, "bad_request", `request body does not match the contract: ${api.ajv.errorsText(validate.errors)}`);
+        }
+        if (op.actorField !== undefined) {
+          const claimed = (body as Json)[op.actorField];
+          if (claimed !== principal)
+            return {
+              status: 403,
+              body: { error: "forbidden", message: `${op.actorField} ${JSON.stringify(claimed)} is not the authenticated principal ${principal}` },
+            };
         }
         return await op.handle({ params, query, body });
       } catch (err) {

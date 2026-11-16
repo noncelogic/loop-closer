@@ -10,6 +10,10 @@ import { anchorCalendarWhen } from "../timer/schedule.ts";
 import type { GraphStore, GraphTx } from "./store.ts";
 import type {
   AcceptLoopInput,
+  ApproveSendInput,
+  ApproveSendResult,
+  Authority,
+  Communication,
   Edge,
   EdgeType,
   FireEventInput,
@@ -26,7 +30,11 @@ import type {
   OpenLoopsFilter,
   PolicyRef,
   ProposeLoopInput,
+  RecordCommunicationInput,
   RejectLoopInput,
+  RequestSendInput,
+  SendRequest,
+  SendRequestResult,
   TransitionInput,
   TransitionResult,
 } from "./types.ts";
@@ -356,6 +364,89 @@ export class Kernel {
     });
   }
 
+  // ---- communications -----------------------------------------------------
+
+  /**
+   * record_communication: stores a Communication on an existing loop. An
+   * inbound one is recorded with its communication_received ledger event; an
+   * outbound one is a draft (sent_under_authority null) until a send of it is
+   * released, which writes communication_sent.
+   */
+  recordCommunication(input: RecordCommunicationInput): Promise<Communication> {
+    return this.#store.transaction((tx) => {
+      this.#loop(tx, input.loop_id);
+      const communication: Communication = { id: this.#newId("comm"), ...input, sent_under_authority: null };
+      this.#check("communication", communication, "bad_request");
+      tx.putCommunication(communication);
+      if (communication.direction === "inbound")
+        this.#append(tx, {
+          at: this.#at(),
+          actor: "system:record_communication",
+          event_type: "communication_received",
+          subject_ids: [communication.id, communication.loop_id],
+          payload: { communication_id: communication.id, loop_id: communication.loop_id },
+          idempotency_key: null,
+        });
+      return communication;
+    });
+  }
+
+  /**
+   * request_send (SPEC B2.6): the sender asks to send an outbound draft of the
+   * loop. Only `autonomous` authority enqueues the send; any other authority
+   * (default joe-approves-each) records a pending approval and sends nothing.
+   * One request per communication.
+   */
+  requestSend(loopId: string, input: RequestSendInput): Promise<SendRequestResult> {
+    return this.#store.transaction((tx) => {
+      const loop = this.#loop(tx, loopId);
+      const communication = this.#communication(tx, input.communication_id);
+      if (communication.loop_id !== loop.id)
+        throw new KernelError("conflict", `communication ${communication.id} belongs to loop ${communication.loop_id}, not ${loop.id}`);
+      if (communication.direction !== "outbound")
+        throw new KernelError("conflict", `communication ${communication.id} is inbound; only an outbound draft can be sent`);
+      if (!ARMED.has(loop.state))
+        throw new KernelError("conflict", `loop ${loop.id} is ${loop.state}; sends are requested only on open loops`);
+      const prior = tx.getSendRequest(communication.id);
+      if (prior)
+        throw new KernelError("conflict", `a send of communication ${communication.id} was already requested (${prior.status})`);
+
+      const request: SendRequest = {
+        communication_id: communication.id,
+        loop_id: loop.id,
+        authority: loop.authority,
+        status: "pending_approval",
+        requested_by: input.actor,
+        requested_at: this.#at(),
+      };
+      tx.putSendRequest(request);
+      if (loop.authority === "autonomous") {
+        this.#release(tx, communication, request, input.actor, { released_by: "autonomous" });
+        return { communication_id: communication.id, authority: loop.authority, status: "enqueued" };
+      }
+      return { communication_id: communication.id, authority: loop.authority, status: "pending_approval" };
+    });
+  }
+
+  /**
+   * approve_send: Joe releases exactly this communication to the sender. Only a
+   * pending approval can be released, and only once.
+   */
+  approveSend(communicationId: string, input: ApproveSendInput): Promise<ApproveSendResult> {
+    return this.#store.transaction((tx) => {
+      const communication = this.#communication(tx, communicationId);
+      const request = tx.getSendRequest(communicationId);
+      if (!request) throw new KernelError("conflict", `no send of communication ${communicationId} is awaiting approval`);
+      if (request.status !== "pending_approval")
+        throw new KernelError("conflict", `communication ${communicationId} is already ${request.status}`);
+      const loop = this.#loop(tx, request.loop_id);
+      if (!ARMED.has(loop.state))
+        throw new KernelError("conflict", `loop ${loop.id} is ${loop.state}; its sends are no longer released`);
+      const ledger_event = this.#release(tx, communication, request, input.approver, { approved_by: input.approver });
+      return { communication_id: communicationId, status: "released", ledger_event };
+    });
+  }
+
   // ---- queries ------------------------------------------------------------
 
   /** open_loops: every non-closed loop matching the filters, with age and governing Whens. */
@@ -449,6 +540,41 @@ export class Kernel {
     return loop;
   }
 
+  #communication(tx: GraphTx, id: string): Communication {
+    const communication = tx.getCommunication(id);
+    if (!communication) throw new KernelError("not_found", `communication ${id} does not exist`);
+    return communication;
+  }
+
+  /**
+   * Hands a communication to the sender: stamps the authority it goes out
+   * under, writes communication_sent and the outbox entry citing it in the
+   * same transaction, and marks the send request enqueued.
+   */
+  #release(tx: GraphTx, communication: Communication, request: SendRequest, actor: string, release: Record<string, unknown>): LedgerEvent {
+    const authority: Authority = request.authority;
+    const sent: Communication = { ...communication, sent_under_authority: authority };
+    this.#check("communication", sent);
+    tx.putCommunication(sent);
+    const at = this.#at();
+    const ledger_event = this.#append(tx, {
+      at,
+      actor,
+      event_type: "communication_sent",
+      subject_ids: [communication.id, request.loop_id],
+      payload: { communication_id: communication.id, loop_id: request.loop_id, authority, requested_by: request.requested_by, ...release },
+      idempotency_key: null,
+    });
+    tx.enqueue({
+      ledger_event_id: ledger_event.id,
+      topic: "send",
+      payload: { communication_id: communication.id, loop_id: request.loop_id },
+      created_at: at,
+    });
+    tx.putSendRequest({ ...request, status: "enqueued" });
+    return ledger_event;
+  }
+
   #whenIds(tx: GraphTx, loop: Loop): string[] {
     const ids = loop.member_node_ids.filter((id) => tx.getNode(id)?.kind === "when");
     if (loop.closing_when_id !== null && !ids.includes(loop.closing_when_id)) ids.push(loop.closing_when_id);
@@ -513,7 +639,7 @@ export class Kernel {
   }
 
   /** Validates a record against its SPEC B2 schema before it is written. */
-  #check(object: "node" | "edge" | "loop" | "ledger-event", value: unknown, code?: KernelErrorCode): void {
+  #check(object: "node" | "edge" | "loop" | "ledger-event" | "communication", value: unknown, code?: KernelErrorCode): void {
     const validate = this.#ajv.getSchema(`${SCHEMA_ID_BASE}${object}.schema.json`);
     if (!validate) throw new Error(`schema ${object} is not registered`);
     if (validate(value)) return;
