@@ -50,3 +50,31 @@ export function loadApiKeys(dir: string = API_KEYS_DIR): Map<string, string> {
   }
   return keys;
 }
+
+/**
+ * Where the per-agent operation scopes are mounted, beside the keys: one file
+ * per principal, named like its key file, listing the operationIds of
+ * contracts/openapi.json that principal may call (whitespace- or
+ * newline-separated; `#` starts a comment). Scopes are data (TECH-STACK §9):
+ * a principal with no file is granted nothing. Joe's principal holds every
+ * scope without a file (src/server.ts).
+ */
+export const API_SCOPES_DIR = "/etc/loopcloser/api-scopes";
+
+/** Agent principal → granted operationIds, from a mounted directory; none if it is absent. */
+export function loadApiScopes(dir: string = API_SCOPES_DIR): Map<string, Set<string>> {
+  const scopes = new Map<string, Set<string>>();
+  if (!existsSync(dir)) return scopes;
+  for (const name of readdirSync(dir).sort()) {
+    if (name.startsWith(".")) continue; // the kubelet's ..data bookkeeping entries
+    const path = join(dir, name);
+    if (!statSync(path).isFile()) continue;
+    const operations = readFileSync(path, "utf8")
+      .split("\n")
+      .map((line) => line.replace(/#.*$/, ""))
+      .flatMap((line) => line.split(/\s+/))
+      .filter((op) => op.length > 0);
+    scopes.set(name, new Set(operations));
+  }
+  return scopes;
+}

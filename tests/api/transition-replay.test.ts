@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { createApiValidator } from "../../src/contracts/index.ts";
+import { B3_OPERATIONS, createApiValidator } from "../../src/contracts/index.ts";
 import type { InMemoryGraphStore } from "../../src/kernel/index.ts";
 import { createServer } from "../../src/server.ts";
 import { experiment, experimentProposal, joe, newKernel, repoRuns, resultsLand } from "../kernel/fixtures.ts";
@@ -22,7 +22,7 @@ before(async () => {
   const env = newKernel();
   store = env.store;
   tick = env.tick;
-  server = createServer({ kernel: env.kernel, apiKeys: new Map([["agent:juno", KEY]]) });
+  server = createServer({ kernel: env.kernel, apiKeys: new Map([["agent:juno", KEY]]), scopes: new Map([["agent:juno", B3_OPERATIONS]]) });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });

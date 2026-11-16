@@ -6,7 +6,7 @@
 // validate is replaced by a 500, never returned.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { createApiValidator, type ApiValidator } from "./contracts/index.ts";
+import { B3_OPERATIONS, createApiValidator, type ApiValidator } from "./contracts/index.ts";
 import { InMemoryGraphStore, Kernel, KernelError } from "./kernel/index.ts";
 import type {
   ApproveSendInput,
@@ -31,6 +31,12 @@ export interface ServerOptions {
   kernel?: Kernel;
   /** Agent principal → API key (the `loopcloser-api-keys` secret). No keys: every API call is 401. */
   apiKeys?: ReadonlyMap<string, string>;
+  /**
+   * Agent principal → the operationIds it may call (src/config.ts loadApiScopes).
+   * Deny by default: a principal without an entry is refused every operation
+   * (403). Joe's principal holds every scope.
+   */
+  scopes?: ReadonlyMap<string, Iterable<string>>;
 }
 
 type Json = Record<string, unknown>;
@@ -53,8 +59,8 @@ interface Reply {
 interface Route {
   operationId: string;
   /**
-   * The principals whose key carries this operation's scope (SPEC B2.6 actor
-   * separation); an operation without one is open to every agent key.
+   * A restriction beyond the principal's scope set, which is checked first for
+   * every operation; approve_send stays Joe's alone whatever the data grants.
    */
   allow?: (principal: string) => boolean;
   /** The request-body field naming who acts; it must be the authenticated principal. */
@@ -78,11 +84,6 @@ interface Context {
  * with full scope). Only Joe releases a send under joe-approves-each.
  */
 export const JOE_PRINCIPAL = "joe";
-/** The sender role: the only agent that may request a send (chaser and drafter send nothing). */
-export const SENDER_ROLE = "sender";
-
-/** A principal's role: its name without the `agent:` prefix (secret entries are named by role, e.g. `sender`). */
-const role = (principal: string): string => principal.replace(/^agent:/, "");
 const isJoe = (principal: string): boolean => principal === JOE_PRINCIPAL;
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();
@@ -212,7 +213,6 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
       // Under joe-approves-each this only records a pending approval (kernel).
       operationId: "request_send",
       method: "POST",
-      allow: (principal) => isJoe(principal) || role(principal) === SENDER_ROLE,
       actorField: "actor",
       pattern: new RegExp(`^/loops/${id}/send-requests$`),
       handle: async ({ params, body }) => ({ status: 202, body: await kernel.requestSend(params[0]!, body as RequestSendInput) }),
@@ -288,6 +288,17 @@ export function createServer(options: ServerOptions = {}): Server {
     .map(([principal, key]) => ({ principal, digest: digest(key) }));
   const api = createApiValidator();
   const table = routes(kernel, api);
+  const known: ReadonlySet<string> = new Set(B3_OPERATIONS);
+  const scopes = new Map<string, ReadonlySet<string>>();
+  for (const [principal, operations] of options.scopes ?? []) {
+    const granted = new Set(operations);
+    for (const op of granted)
+      if (!known.has(op)) throw new Error(`scope for ${principal} names ${JSON.stringify(op)}, which is not an operation of the API contract`);
+    scopes.set(principal, granted);
+  }
+  /** Deny by default: only Joe and principals whose scope set names the operation may call it. */
+  const granted = (principal: string, operationId: string): boolean =>
+    isJoe(principal) || (scopes.get(principal)?.has(operationId) ?? false);
 
   const write = (res: ServerResponse, status: number, body: unknown): void => {
     res.writeHead(status, { "content-type": "application/json" });
@@ -348,7 +359,8 @@ export function createServer(options: ServerOptions = {}): Server {
         const principal = authenticate(req.headers.authorization, keys);
         if (principal === undefined)
           return { status: 401, body: { error: "unauthorized", message: "missing or unknown agent key" } };
-        if (op.allow && !op.allow(principal))
+        // Scopes are checked before the request is read, so a refused call changes nothing.
+        if (!granted(principal, op.operationId) || (op.allow && !op.allow(principal)))
           return { status: 403, body: { error: "forbidden", message: `${principal} lacks the scope for ${op.operationId}` } };
 
         const query = new Map<string, string>();
