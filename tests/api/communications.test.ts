@@ -79,7 +79,7 @@ async function openLoop(authority: Authority = "joe-approves-each"): Promise<str
   const loopId = proposed.body["loop"]["id"] as string;
   assert.equal((await call("accept_loop", `/loops/${loopId}/accept`, { acceptor: "joe" })).status, 200);
   if (authority !== "joe-approves-each")
-    await store.transaction((tx) => tx.putLoop({ ...tx.getLoop(loopId)!, authority }));
+    await store.transaction(async (tx) => tx.putLoop({ ...(await tx.getLoop(loopId))!, authority }));
   return loopId;
 }
 
@@ -103,7 +103,7 @@ async function draft(loopId: string, direction: "outbound" | "inbound" = "outbou
 }
 
 const outboxFor = (communicationId: string) =>
-  store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === communicationId));
+  store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === communicationId));
 
 test("record_communication stores a communication on an existing loop", async () => {
   const loopId = await openLoop();
@@ -137,7 +137,7 @@ test("a send request under joe-approves-each waits for approval", async () => {
 
   // Nothing is sent: no outbox entry, no communication_sent event.
   assert.deepEqual(await outboxFor(comm["id"]), []);
-  const sent = await store.read((tx) => tx.ledger().filter((e) => e.event_type === "communication_sent" && e.subject_ids.includes(comm["id"])));
+  const sent = await store.read(async (tx) => (await tx.ledger()).filter((e) => e.event_type === "communication_sent" && e.subject_ids.includes(comm["id"])));
   assert.deepEqual(sent, []);
   assert.equal((await store.read((tx) => tx.getSendRequest(comm["id"])))?.status, "pending_approval");
 
@@ -175,7 +175,7 @@ test("an approved communication is enqueued once", async () => {
 });
 
 test("an approval of an unknown or unrequested communication enqueues nothing", async () => {
-  const before = await store.read((tx) => tx.outbox().length);
+  const before = await store.read(async (tx) => (await tx.outbox()).length);
   const unknown = await call("approve_send", "/communications/lc_comm_nope/approve", { approver: "joe" }, "joe");
   assert.equal(unknown.status, 404);
 
@@ -184,7 +184,7 @@ test("an approval of an unknown or unrequested communication enqueues nothing", 
   const comm = await draft(loopId);
   const unrequested = await call("approve_send", `/communications/${comm["id"]}/approve`, { approver: "joe" }, "joe");
   assert.equal(unrequested.status, 409);
-  assert.equal(await store.read((tx) => tx.outbox().length), before);
+  assert.equal(await store.read(async (tx) => (await tx.outbox()).length), before);
 });
 
 test("a send request under autonomous authority enqueues the send", async () => {
@@ -196,7 +196,7 @@ test("a send request under autonomous authority enqueues the send", async () => 
   assert.deepEqual(requested.body, { communication_id: comm["id"], authority: "autonomous", status: "enqueued" });
   const queued = await outboxFor(comm["id"]);
   assert.equal(queued.length, 1);
-  const event = await store.read((tx) => tx.ledger().find((e) => e.id === queued[0]!.ledger_event_id));
+  const event = await store.read(async (tx) => (await tx.ledger()).find((e) => e.id === queued[0]!.ledger_event_id));
   assert.equal(event?.event_type, "communication_sent");
   assert.equal((await store.read((tx) => tx.getCommunication(comm["id"])))?.sent_under_authority, "autonomous");
 
@@ -211,7 +211,7 @@ test("a send request is refused for a communication that is not this loop's outb
   const otherLoop = await openLoop("autonomous");
   const inbound = await draft(loopId, "inbound");
   const elsewhere = await draft(otherLoop);
-  const before = await store.read((tx) => tx.outbox().length);
+  const before = await store.read(async (tx) => (await tx.outbox()).length);
 
   const send = (loop: string, communication_id: string) =>
     call("request_send", `/loops/${loop}/send-requests`, { communication_id, actor: "agent:sender" }, "agent:sender");
@@ -219,7 +219,7 @@ test("a send request is refused for a communication that is not this loop's outb
   assert.equal((await send(loopId, elsewhere["id"])).status, 409);
   assert.equal((await send(loopId, "lc_comm_nope")).status, 404);
   assert.equal((await send("lc_loop_nope", elsewhere["id"])).status, 404);
-  assert.equal(await store.read((tx) => tx.outbox().length), before);
+  assert.equal(await store.read(async (tx) => (await tx.outbox()).length), before);
 });
 
 test("only the sender may request a send: chaser and drafter are refused and nothing is enqueued", async () => {
@@ -313,7 +313,7 @@ test("over HTTP, the sender cannot make an outsider an owner's receiver through 
       assert.equal(comm.status, 201, JSON.stringify(comm.body));
       const sent = await post(`/loops/${loopId}/send-requests`, { communication_id: comm.body["id"], actor: "agent:sender" }, "agent:sender");
       assert.equal(sent.status, 409, `bypass ${i} must be refused, got ${sent.status} ${JSON.stringify(sent.body)}`);
-      const queued = await env.store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.body["id"]));
+      const queued = await env.store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === comm.body["id"]));
       assert.deepEqual(queued, []);
     }
   } finally {

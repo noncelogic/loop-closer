@@ -181,7 +181,7 @@ test("a repeated transition with the same idempotency key returns the first resu
   assert.deepEqual(second.body, first.body);
 
   // Applied once: one transition event with that key in the ledger.
-  const events = await store.read((tx) => tx.ledger().filter((e) => e.idempotency_key === "http-idem-1"));
+  const events = await store.read(async (tx) => (await tx.ledger()).filter((e) => e.idempotency_key === "http-idem-1"));
   assert.equal(events.length, 1);
 
   // The same key for a different change is a conflict.

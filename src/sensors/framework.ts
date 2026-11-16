@@ -142,7 +142,7 @@ export class SensorFramework {
   async register(def: SensorDefinition): Promise<Sensor> {
     validateDefinition(def);
     const config = scheduleConfig(def);
-    await this.#store.transaction((tx) => {
+    await this.#store.transaction(async (tx) => {
       const at = this.#now().toISOString();
       // The heartbeat arrives the way the sensor reports; the miss is found by polling the graph.
       const whens: Array<[string, string, Record<string, unknown>]> = [
@@ -150,7 +150,7 @@ export class SensorFramework {
         [missedHeartbeatWhenId(def.id), MISSED_HEARTBEAT_EVENT_TYPE, { source: sensorActor(def.id), mechanism: "poll", config }],
       ];
       for (const [id, eventType, binding] of whens) {
-        const existing = tx.getNode(id);
+        const existing = await tx.getNode(id);
         if (existing && existing.kind !== "when") throw new SensorError(`node ${id} exists and is not a When`);
         const node: Node = existing
           ? { ...existing, status: "active", attributes: { ...existing.attributes, source_binding: binding } }
@@ -162,7 +162,7 @@ export class SensorFramework {
               attributes: { when_type: "event", event_type: eventType, source_binding: binding, fired_at: null, fire_count: 0 },
             };
         this.#check(node);
-        tx.putNode(node);
+        await tx.putNode(node);
       }
     });
     return new Sensor(this.#kernel, def, this.#now);
@@ -202,9 +202,9 @@ export class SensorFramework {
   }
 }
 
-function findMissed(tx: GraphTx, now: Date): Array<Omit<MissedHeartbeat, "event_id">> {
+async function findMissed(tx: GraphTx, now: Date): Promise<Array<Omit<MissedHeartbeat, "event_id">>> {
   const missed: Array<Omit<MissedHeartbeat, "event_id">> = [];
-  for (const node of tx.listNodes()) {
+  for (const node of await tx.listNodes()) {
     const a = node.attributes;
     if (node.kind !== "when" || node.status !== "active" || a["event_type"] !== MISSED_HEARTBEAT_EVENT_TYPE) continue;
     const config = (a["source_binding"] as { config?: Record<string, unknown> } | undefined)?.config ?? {};
@@ -212,7 +212,7 @@ function findMissed(tx: GraphTx, now: Date): Array<Omit<MissedHeartbeat, "event_
     const interval = config["heartbeat_interval_seconds"];
     const grace = config["heartbeat_grace_seconds"] ?? 0;
     if (typeof sensorId !== "string" || typeof interval !== "number" || typeof grace !== "number" || interval <= 0) continue;
-    const beat = tx.getNode(heartbeatWhenId(sensorId));
+    const beat = await tx.getNode(heartbeatWhenId(sensorId));
     if (!beat) continue;
     const firedAt = beat.attributes["fired_at"];
     const last = typeof firedAt === "string" ? firedAt : beat.created_at;

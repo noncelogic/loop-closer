@@ -76,7 +76,7 @@ test("a factory-notification loop inherits autonomous authority and other types 
     const comm = await kernel.recordCommunication(outbound(loopId, [receiver]));
     const result = await kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" });
     assert.deepEqual(result, { communication_id: comm.id, authority: "autonomous", status: "enqueued" });
-    const queued = await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id));
+    const queued = await store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === comm.id));
     assert.equal(queued.length, 1);
   }
 
@@ -110,9 +110,9 @@ test("a factory-notification send to a receiver other than the owner's is refuse
       },
     );
     // Nothing is sent...
-    const queued = await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id));
+    const queued = await store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === comm.id));
     assert.deepEqual(queued, []);
-    const sent = await store.read((tx) => tx.ledger().filter((e) => e.event_type === "communication_sent" && e.subject_ids.includes(comm.id)));
+    const sent = await store.read(async (tx) => (await tx.ledger()).filter((e) => e.event_type === "communication_sent" && e.subject_ids.includes(comm.id)));
     assert.deepEqual(sent, []);
     assert.equal((await store.read((tx) => tx.getCommunication(comm.id)))?.sent_under_authority, null);
     // ...and the refusal is recorded; it cannot be approved or retried into a send.
@@ -155,7 +155,7 @@ test("caller-supplied graph claims do not make a receiver the owner's", async ()
       kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" }),
       (err: unknown) => err instanceof KernelError && err.code === "conflict",
     );
-    const queued = await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id));
+    const queued = await store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === comm.id));
     assert.deepEqual(queued, []);
     assert.equal((await store.read((tx) => tx.getSendRequest(comm.id)))?.status, "refused");
   }
@@ -169,7 +169,7 @@ test("with no registered owner receivers a factory-notification send is refused"
     kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" }),
     (err: unknown) => err instanceof KernelError && err.code === "conflict",
   );
-  assert.deepEqual(await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id)), []);
+  assert.deepEqual(await store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === comm.id)), []);
 });
 
 test("a loop whose type has a policy keeps both the policy and its key-result reference", async () => {

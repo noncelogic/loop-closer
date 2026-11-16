@@ -40,7 +40,7 @@ test("sensor emits fire_event into the graph and a missed heartbeat is recorded 
     heartbeat: { interval_seconds: 300, grace_seconds: 60 },
   });
   assert.equal(ci.actor, "sensor:ci");
-  const registered = await store.read((tx) => [tx.getNode(ci.heartbeat_when_id), tx.getNode(ci.missed_heartbeat_when_id)]);
+  const registered = await store.read(async (tx) => [await tx.getNode(ci.heartbeat_when_id), await tx.getNode(ci.missed_heartbeat_when_id)]);
   for (const node of registered) {
     assert.ok(node);
     assertValid("node", node);
