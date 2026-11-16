@@ -123,7 +123,8 @@ export type FireEventInput =
       actor?: string;
       /**
        * The one thing the change is about (e.g. a listing slug). A When whose
-       * source_binding.config.subject names a different subject does not fire.
+       * source_binding.config.subject does not name exactly this subject (or
+       * names no subject at all) does not fire.
        */
       subject?: string;
     };

@@ -57,7 +57,7 @@ const listingStatusChanged: Node = {
   attributes: {
     when_type: "event",
     event_type: LISTING_STATUS_CHANGED,
-    source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll" },
+    source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll", config: { subject: "rove-connector" } },
     fired_at: null,
     fire_count: 0,
   },
@@ -292,8 +292,20 @@ test("with two listings bound to two Whens, a status change on one listing fires
 
 test("a change on a listing no When is bound to is reported unbound and fires nothing", async () => {
   const { env, plugin, connector, listings, setPage } = await twoListings();
+  // A listing When that names no listing at all must not hear this change either.
+  const subjectless: Node = {
+    ...listingStatusChanged,
+    id: "lc_when_listing_no_subject",
+    attributes: {
+      ...listingStatusChanged.attributes,
+      source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll" },
+    },
+  };
+  const skillListing: Node = { ...listing, id: "lc_what_rove_skill_listing", attributes: { what_type: "artifact", title: "Rove skill listing" } };
+  const unnamed = await waitingLoop(env, skillListing, subjectless, "unnamed");
   await connector.wait();
   await plugin.wait();
+  await unnamed.wait();
   const before = (await env.store.read((tx) => tx.ledger())).length;
   setPage([{ subject: "rove-skill", status: "scanning" }]);
   const report = await listings.poll();
@@ -304,6 +316,8 @@ test("a change on a listing no When is bound to is reported unbound and fires no
   assert.deepEqual(after.slice(before).filter((e) => e.event_type === "when_fired" && e.payload["event_type"] === LISTING_STATUS_CHANGED), []);
   assert.equal(await fireCount(env, connectorWhen.id), 0);
   assert.equal(await fireCount(env, pluginWhen.id), 0);
+  assert.equal(await fireCount(env, subjectless.id), 0);
   assert.equal((await env.kernel.getLoop(connector.loopId)).state, "waiting");
   assert.equal((await env.kernel.getLoop(plugin.loopId)).state, "waiting");
+  assert.equal((await env.kernel.getLoop(unnamed.loopId)).state, "waiting");
 });

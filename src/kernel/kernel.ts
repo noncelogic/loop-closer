@@ -322,8 +322,8 @@ export class Kernel {
 
   /**
    * fire_event: records the firing of a When (by id, or every event-When bound
-   * to event_type + source; with a subject, only those whose binding names that
-   * subject or no subject at all) as one when_fired ledger event, then applies the
+   * to event_type + source; with a subject, only those whose binding names exactly
+   * that subject -- a When naming no subject does not hear subject changes) as one when_fired ledger event, then applies the
    * transitions the firing causes on armed loops (see whatFiresNext). A
    * replayed idempotency key applies once. Workflow runs arrive with templates.
    */
@@ -348,7 +348,7 @@ export class Kernel {
           const target = binding?.config?.["subject"];
           return n.kind === "when" && n.status === "active" && a["when_type"] === "event" &&
             a["event_type"] === input.event_type && binding?.source === input.source &&
-            (input.subject === undefined || typeof target !== "string" || target === input.subject);
+            (input.subject === undefined || target === input.subject);
         });
         if (whens.length === 0) {
           const about = input.subject === undefined ? "" : ` about ${input.subject}`;
