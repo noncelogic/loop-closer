@@ -270,7 +270,12 @@ test("only Joe's own key approves a send; an agent naming Joe is refused and not
 test("over HTTP, the sender cannot make an outsider an owner's receiver through graph claims", async () => {
   const outsider = { ...joe, id: "lc_who_outsider", attributes: { ...joe.attributes, name: "Outsider" } };
   const env = newKernel({ ownerReceiverIds: [joe.id] });
-  const own = createServer({ kernel: env.kernel, apiKeys: KEYS });
+  // Scopes are default-deny (LC-M3-T1c): grant the sender exactly what this scenario drives, so the
+  // refusal under test is the kernel's owner-receiver check, not a missing scope.
+  const ownScopes = new Map<string, readonly string[]>([
+    ["agent:sender", ["propose_loop", "record_communication", "request_send"]],
+  ]);
+  const own = createServer({ kernel: env.kernel, apiKeys: KEYS, scopes: ownScopes });
   await new Promise<void>((resolve) => own.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(own.address() as AddressInfo).port}/v1`;
   const post = async (path: string, body: unknown, principal: string) => {
