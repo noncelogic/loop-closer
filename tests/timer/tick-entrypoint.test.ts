@@ -6,10 +6,11 @@
 // Requires Docker with the Compose plugin (tests/schema/replica.ts).
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseAllDocuments } from "yaml";
 import { Replica, repoRoot } from "../schema/replica.ts";
 import { PgTimerStore } from "../../src/timer/pg-store.ts";
@@ -38,14 +39,32 @@ function cronJobCommand(): string[] {
   return tick.command;
 }
 
-function runEntrypoint(databaseUrl: string | undefined): { status: number | null; stdout: string; stderr: string } {
+/** The instant every entrypoint child and its assertions share (see fixtures/frozen-clock.mjs). */
+const FROZEN_NOW = "2026-11-16T12:00:00.000Z";
+const FROZEN_CLOCK = pathToFileURL(join(repoRoot, "tests", "timer", "fixtures", "frozen-clock.mjs")).href;
+
+/**
+ * Runs the manifest's command asynchronously, so fixtures in this process
+ * (e.g. a TCP server) keep serving while the child runs.
+ */
+async function runEntrypoint(databaseUrl: string | undefined): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const [cmd, ...args] = cronJobCommand();
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env["DATABASE_URL"];
   if (databaseUrl !== undefined) env["DATABASE_URL"] = databaseUrl;
+  env["FROZEN_NOW"] = FROZEN_NOW;
+  env["NODE_OPTIONS"] = `${env["NODE_OPTIONS"] ?? ""} --import=${FROZEN_CLOCK}`.trim();
   // The image's WORKDIR is the app root, where dist/ sits.
-  const r = spawnSync(cmd!, args, { cwd: repoRoot, env, encoding: "utf8", timeout: 60_000 });
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  const child = spawn(cmd!, args, { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d));
+  child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d));
+  const status = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code));
+  });
+  return { status, stdout, stderr };
 }
 
 test("the command in deploy/tick-cronjob.yaml names a file the build emits", () => {
@@ -57,7 +76,7 @@ test("the command in deploy/tick-cronjob.yaml names a file the build emits", () 
   assert.ok(existsSync(join(repoRoot, script)), `npm run build must emit ${script}`);
 });
 
-test("one entrypoint run fires a due calendar When once in the ledger and exits zero", { timeout: 120_000 }, () => {
+test("one entrypoint run fires a due calendar When once in the ledger and exits zero", { timeout: 120_000 }, async () => {
   db.psql(`
     INSERT INTO nodes (id, kind, created_at, status, attributes) VALUES
       ('lc_when_due', 'when', now(), 'active',
@@ -66,7 +85,7 @@ test("one entrypoint run fires a due calendar When once in the ledger and exits 
         '{"when_type":"calendar","schedule":{"at":"2999-01-01T00:00:00Z"},"timezone":"UTC","next_fire_at":"2999-01-01T00:00:00Z"}');`);
   const url = `postgres://loopcloser:loopcloser@127.0.0.1:${db.hostPort()}/loopcloser`;
 
-  const first = runEntrypoint(url);
+  const first = await runEntrypoint(url);
   assert.equal(first.status, 0, `tick failed:\n${first.stderr}`);
 
   const fired = db
@@ -80,31 +99,50 @@ test("one entrypoint run fires a due calendar When once in the ledger and exits 
   assert.equal(actor, "sensor:calendar");
   assert.equal(key, "calendar:lc_when_due:2026-11-01T08:00:00.000Z");
   assert.equal(scheduledFor, "2026-11-01T08:00:00.000Z");
+  // The child ran on the injected clock, not its own wall clock.
+  assert.equal(
+    db.psql(`SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM ledger_events WHERE id = '${id}'`),
+    FROZEN_NOW,
+  );
 
-  // next_fire_at advanced into the future; the not-yet-due When is untouched.
+  // next_fire_at advanced to the first daily slot after the frozen now; the
+  // not-yet-due When is untouched.
   const next = db.psql(`SELECT attributes->>'next_fire_at' FROM nodes WHERE id = 'lc_when_due'`);
-  assert.ok(Date.parse(next) > Date.now(), `next_fire_at must advance past now, got ${next}`);
+  assert.equal(next, "2026-11-17T08:00:00.000Z");
+  assert.ok(Date.parse(next) > Date.parse(FROZEN_NOW));
   assert.equal(db.psql(`SELECT count(*) FROM ledger_events WHERE 'lc_when_later' = ANY(subject_ids)`), "0");
 
   // A second run finds nothing due: the firing is recorded exactly once.
-  const second = runEntrypoint(url);
+  const second = await runEntrypoint(url);
   assert.equal(second.status, 0, `second tick failed:\n${second.stderr}`);
   assert.equal(db.psql(`SELECT count(*) FROM ledger_events WHERE 'lc_when_due' = ANY(subject_ids)`), "1");
 });
 
 test("an entrypoint run against an unreachable database exits non-zero", { timeout: 120_000 }, async () => {
-  // A port nothing listens on: bind an ephemeral one, then free it.
-  const server = new net.Server();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  // An owned fixture: a listener bound for the whole child run that resets
+  // every connection, so no other process can take the port meanwhile.
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.resetAndDestroy();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const { port } = server.address() as { port: number };
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-
-  const r = runEntrypoint(`postgres://loopcloser:loopcloser@127.0.0.1:${port}/loopcloser`);
-  assert.notEqual(r.status, 0, "an unreachable database must fail the tick");
+  let r;
+  try {
+    r = await runEntrypoint(`postgres://loopcloser:loopcloser@127.0.0.1:${port}/loopcloser`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.ok(sockets.size > 0, "the tick must have tried the fixture database");
   assert.notEqual(r.status, null, `the tick must exit, not hang:\n${r.stderr}`);
+  assert.notEqual(r.status, 0, "an unreachable database must fail the tick");
   assert.match(r.stderr, /tick failed/);
 
-  const missing = runEntrypoint(undefined);
+  const missing = await runEntrypoint(undefined);
   assert.notEqual(missing.status, 0, "a tick without DATABASE_URL must fail");
   assert.match(missing.stderr, /DATABASE_URL/);
 });
