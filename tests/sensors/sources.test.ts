@@ -227,7 +227,6 @@ test("calendar and portal-read sources each drive a fire_event through the frame
   });
 });
 
-<<<<<<< HEAD
 // LC-SENSE-LISTING-ROUTE: each directory listing is its own loop (SPEC B2.3), so
 // a When names the listing it watches in source_binding.config.subject and a
 // change to one listing fires only that listing's When.
@@ -326,7 +325,8 @@ test("a change on a listing no When is bound to is reported unbound and fires no
   assert.equal((await env.kernel.getLoop(connector.loopId)).state, "waiting");
   assert.equal((await env.kernel.getLoop(plugin.loopId)).state, "waiting");
   assert.equal((await env.kernel.getLoop(unnamed.loopId)).state, "waiting");
-=======
+});
+
 // LC-SENSE-PUBLIC-LISTING acceptance: the listings sensor reads each tracked
 // listing's public directory page (URL per listing from configuration) with no
 // credential. The page fetch is replaced by a stub, so CI never reads the live
@@ -486,5 +486,4 @@ test("an unreachable directory page fails the read without a heartbeat", async (
       assert.deepEqual(missed.map((m) => m.sensor_id), ["anthropic_listings"]);
     });
   }
->>>>>>> origin/main
 });
