@@ -22,6 +22,7 @@ import type {
   FiringEffect,
   HealthMetrics,
   LedgerEvent,
+  LedgerEventsPage,
   LedgerEventType,
   Loop,
   LoopState,
@@ -565,6 +566,20 @@ export class Kernel {
         median_open_age_seconds: median,
         abandonment_count: loops.filter((l) => l.close_reason === "abandoned" && inWindow(l.closed_at)).length,
       };
+    });
+  }
+
+  /**
+   * ledger_events (SPEC B2.4): read-only, up to `limit` ledger events committed
+   * after `after` (a commit position; 0 is the start), in commit order, with the
+   * position to read from next. Nothing new committed: no events and `next`
+   * equal to `after`. A position beyond the committed ledger is a bad request.
+   */
+  ledgerEvents(after: number, limit: number): Promise<LedgerEventsPage> {
+    return this.#store.read((tx) => {
+      const page = tx.ledgerAfter(after, limit);
+      if (!page) throw new KernelError("bad_request", `cursor ${after} is not a position in the committed ledger`);
+      return { events: page.events, next: page.position };
     });
   }
 

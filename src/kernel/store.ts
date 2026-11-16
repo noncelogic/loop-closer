@@ -24,6 +24,14 @@ export interface GraphTx {
   findEventByIdempotencyKey(key: string): LedgerEvent | undefined;
   /** The full ledger in append order. */
   ledger(): LedgerEvent[];
+  /**
+   * Up to `limit` events committed after commit position `position`, in commit
+   * order, and the position after the last of them (`position` itself when
+   * there are none). Position 0 is the start of the ledger; a position is the
+   * count of events committed before it. Undefined when `position` lies beyond
+   * the committed ledger, so it was never handed out.
+   */
+  ledgerAfter(position: number, limit: number): { events: LedgerEvent[]; position: number } | undefined;
   getCommunication(id: string): Communication | undefined;
   putCommunication(communication: Communication): void;
   /** The send request on a communication, if one was made. */
@@ -126,6 +134,11 @@ export class InMemoryGraphStore implements GraphStore {
       },
       findEventByIdempotencyKey: (key) => copy(s.idempotency.get(key)),
       ledger: () => s.ledger.map(copy),
+      ledgerAfter: (position, limit) => {
+        if (!Number.isSafeInteger(position) || position < 0 || position > s.ledger.length) return undefined;
+        const events = s.ledger.slice(position, position + Math.max(0, limit)).map(copy);
+        return { events, position: position + events.length };
+      },
       getCommunication: (id) => copy(s.communications.get(id)),
       putCommunication: (communication) => (write(), void s.communications.set(communication.id, copy(communication))),
       getSendRequest: (id) => copy(s.sendRequests.get(id)),

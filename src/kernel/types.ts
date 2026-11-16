@@ -158,6 +158,12 @@ export interface FiringEffect {
 }
 
 /** OpenAPI HealthResult, without the requested window. */
+/** A page of ledger_events: events in commit order and the commit position after them. */
+export interface LedgerEventsPage {
+  events: LedgerEvent[];
+  next: number;
+}
+
 export interface HealthMetrics {
   snapshot_at: string;
   breach_pct: number;

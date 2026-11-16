@@ -37,7 +37,10 @@ export const SUPERSESSION_TYPES = [
   "loop_supersession",
 ] as const;
 
-/** SPEC B3 operations; each must be exactly one OpenAPI operationId. */
+/**
+ * SPEC B3 operations, plus ledger_events (LC-M4-T2: reading the B2.4 ledger
+ * after a cursor); each must be exactly one OpenAPI operationId.
+ */
 export const B3_OPERATIONS = [
   "propose_loop",
   "accept_loop",
@@ -54,6 +57,7 @@ export const B3_OPERATIONS = [
   "approve_send",
   "health",
   "export",
+  "ledger_events",
 ] as const;
 
 type Json = Record<string, unknown>;
