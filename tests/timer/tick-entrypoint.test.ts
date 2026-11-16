@@ -122,7 +122,7 @@ test("an entrypoint run against an unreachable database exits non-zero", { timeo
   // An owned fixture: a listener bound for the whole child run that resets
   // every connection, so no other process can take the port meanwhile.
   const sockets = new Set<net.Socket>();
-  const server = net.createServer((socket) => {
+  const server = new net.Server((socket) => {
     sockets.add(socket);
     socket.resetAndDestroy();
   });
