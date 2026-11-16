@@ -1,0 +1,82 @@
+name: estate-image
+
+# LC-D1b: on merge to main, build the loopcloser image on the estate's
+# self-hosted runners and push it, tagged sha-<commit>, to the estate registry
+# that aks-obs-01 pulls from. Never touches a cluster: rollout is estate-side
+# GitOps, pinning a sha-<commit> tag.
+#
+# Trigger is `push` to main only: no pull_request, pull_request_target or
+# workflow_run, so unmerged code never reaches a self-hosted runner
+# (docs/EXTERNAL-REVIEW.md §1).
+#
+# The registry push credential lives in OpenBao and is read with the job's
+# GitHub OIDC token (OpenBao JWT auth); it is never a GitHub secret. The
+# registry, OpenBao address, KV path and role are repository variables
+# (configuration, not secrets):
+#   ESTATE_REGISTRY                  registry host aks-obs-01 pulls from
+#   OPENBAO_ADDR                     OpenBao URL reachable from the runners
+#   ESTATE_REGISTRY_OPENBAO_PATH     KV v2 API path holding `username` and
+#                                    `password` (e.g. kv/data/<path>)
+#   ESTATE_REGISTRY_OPENBAO_ROLE     OpenBao JWT role bound to this repo's
+#                                    main-branch OIDC subject
+# tests/deploy/image-workflow.test.ts checks this file.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: estate-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: [self-hosted, linux]
+    timeout-minutes: 20
+    steps:
+      - name: Check estate registry configuration
+        env:
+          ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
+          ESTATE_REGISTRY_OPENBAO_PATH: ${{ vars.ESTATE_REGISTRY_OPENBAO_PATH }}
+          ESTATE_REGISTRY_OPENBAO_ROLE: ${{ vars.ESTATE_REGISTRY_OPENBAO_ROLE }}
+        run: |
+          missing=0
+          for v in ESTATE_REGISTRY OPENBAO_ADDR ESTATE_REGISTRY_OPENBAO_PATH ESTATE_REGISTRY_OPENBAO_ROLE; do
+            if [ -z "${!v}" ]; then
+              echo "::error::repository variable $v is not set"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the registry push credential from OpenBao
+        id: openbao
+        uses: hashicorp/vault-action@v3
+        with:
+          url: ${{ vars.OPENBAO_ADDR }}
+          method: jwt
+          role: ${{ vars.ESTATE_REGISTRY_OPENBAO_ROLE }}
+          exportEnv: false
+          secrets: |
+            ${{ vars.ESTATE_REGISTRY_OPENBAO_PATH }} username | REGISTRY_USERNAME ;
+            ${{ vars.ESTATE_REGISTRY_OPENBAO_PATH }} password | REGISTRY_PASSWORD
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.ESTATE_REGISTRY }}
+          username: ${{ steps.openbao.outputs.REGISTRY_USERNAME }}
+          password: ${{ steps.openbao.outputs.REGISTRY_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
