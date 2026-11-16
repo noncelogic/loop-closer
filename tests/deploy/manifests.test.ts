@@ -294,6 +294,29 @@ test("kustomize build renders and the Deployment env matches the frozen config c
   }
 });
 
+// LC-EST-DB-ROLE acceptance: the app role 0001_loop_model.sql grants to is
+// created by the operator at bootstrap (postInitSQL runs as the postgres
+// superuser), so the migrate entrypoint, connecting as the initdb owner
+// `loopcloser`, finds it and never needs CREATEROLE.
+test("the loopcloser-db cluster bootstrap creates the loopcloser_app NOLOGIN role", () => {
+  const db = one(render(), "Cluster", DB_CLUSTER);
+  const initdb = db["spec"]["bootstrap"]["initdb"] as Obj;
+  assert.equal(initdb["owner"], "loopcloser");
+  const postInitSQL = (initdb["postInitSQL"] ?? []) as string[];
+  const creates = postInitSQL.filter((s) => /\bCREATE\s+ROLE\s+loopcloser_app\b/i.test(s));
+  assert.equal(creates.length, 1, `expected one CREATE ROLE loopcloser_app in postInitSQL: ${JSON.stringify(postInitSQL)}`);
+  const stmt = creates[0]!;
+  for (const attr of ["NOLOGIN", "NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "NOINHERIT"]) {
+    assert.match(stmt, new RegExp(`\\b${attr}\\b`, "i"), `loopcloser_app must be ${attr}`);
+  }
+  // The owner keeps least privilege: nothing in the manifest grants it CREATEROLE.
+  const managed = ((db["spec"]["managed"]?.["roles"] ?? []) as Obj[]).filter((r) => r["name"] === "loopcloser");
+  for (const r of managed) assert.notEqual(r["createrole"], true, "loopcloser must not get CREATEROLE");
+  for (const s of [...postInitSQL, ...((initdb["postInitApplicationSQL"] ?? []) as string[])]) {
+    assert.doesNotMatch(s, /\bloopcloser\b[^_]*\bCREATEROLE\b/i, `loopcloser must not get CREATEROLE: ${s}`);
+  }
+});
+
 test("Dockerfile builds on Node 24 with tsc and runs node dist/main.js", () => {
   const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
   assert.match(dockerfile, /^FROM node:24[\w.-]*/m);

@@ -17,6 +17,12 @@ spec:
     initdb:
       database: loopcloser
       owner: loopcloser
+      # The service role the migrations grant to (db/migrations/0001). The
+      # operator runs postInitSQL once at bootstrap as the postgres superuser,
+      # so the owner `loopcloser`, which applies the migrations through the
+      # migrate entrypoint, finds the role and never needs CREATEROLE.
+      postInitSQL:
+        - CREATE ROLE loopcloser_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector;
   storage:
