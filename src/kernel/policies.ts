@@ -21,8 +21,9 @@ export interface EscalationPolicy extends PolicyRef {
 
 /**
  * Who a loop of this type may send to: `any` leaves receivers to the
- * authority (approval) gate; `owner_only` allows only the accountable Who and
- * the receivers it owns (active `owns` edges from the owner to a Who).
+ * authority (approval) gate; `owner_only` allows only the service owner's
+ * registered receivers (KernelOptions.ownerReceiverIds), never receivers a
+ * caller claims through the graph.
  */
 export type ReceiverScope = "any" | "owner_only";
 

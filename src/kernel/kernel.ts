@@ -62,6 +62,14 @@ export interface KernelOptions {
   defaultPolicyRefs?: { ageing: PolicyRef; escalation: PolicyRef };
   /** Loop-type policies (SPEC B4); defaults to LOOP_TYPE_POLICIES. */
   loopTypePolicies?: readonly LoopTypePolicy[];
+  /**
+   * The service owner's registered receivers (Who ids), set by the operator
+   * when the service starts. They are the only receivers an `owner_only` loop
+   * type may send to; nothing a caller writes into the graph (the loop's
+   * accountable Who, `owns` edges) adds to them. Defaults to none: every
+   * `owner_only` send is refused until receivers are registered.
+   */
+  ownerReceiverIds?: readonly string[];
 }
 
 const DEFAULT_POLICY_REFS = {
@@ -104,6 +112,7 @@ export class Kernel {
   readonly #newId: (prefix: string) => string;
   readonly #policyRefs: { ageing: PolicyRef; escalation: PolicyRef };
   readonly #loopTypePolicies: readonly LoopTypePolicy[];
+  readonly #ownerReceiverIds: ReadonlySet<string>;
   readonly #ajv = createValidator();
 
   constructor(store: GraphStore, options: KernelOptions = {}) {
@@ -112,6 +121,7 @@ export class Kernel {
     this.#newId = options.newId ?? ((prefix) => `lc_${prefix}_${randomUUID()}`);
     this.#policyRefs = options.defaultPolicyRefs ?? DEFAULT_POLICY_REFS;
     this.#loopTypePolicies = options.loopTypePolicies ?? LOOP_TYPE_POLICIES;
+    this.#ownerReceiverIds = new Set(options.ownerReceiverIds ?? []);
   }
 
   // ---- intake -------------------------------------------------------------
@@ -430,7 +440,7 @@ export class Kernel {
         requested_by: input.actor,
         requested_at: this.#at(),
       };
-      const outsiders = this.#receiversOutsideScope(tx, loop, communication);
+      const outsiders = this.#receiversOutsideScope(loop, communication);
       if (outsiders.length > 0) {
         const refused: SendRequest = { ...request, status: "refused", refused_receiver_ids: outsiders };
         tx.putSendRequest(refused);
@@ -603,17 +613,15 @@ export class Kernel {
 
   /**
    * Receivers of `communication` the loop's type does not allow. Under an
-   * `owner_only` scope the allowed receivers are the accountable Who and the
-   * Whos it owns (active `owns` edges); under `any` (the default) none are refused.
+   * `owner_only` scope the allowed receivers are exactly the service owner's
+   * registered receivers (KernelOptions.ownerReceiverIds). Graph claims a
+   * caller can write (the loop's accountable Who, `owns` edges) grant nothing.
+   * Under `any` (the default) none are refused.
    */
-  #receiversOutsideScope(tx: GraphTx, loop: Loop, communication: Communication): string[] {
+  #receiversOutsideScope(loop: Loop, communication: Communication): string[] {
     const policy = loopTypePolicy(loop.loop_type, this.#loopTypePolicies);
     if (policy?.receivers !== "owner_only") return [];
-    const owner = loop.accountable_who_id;
-    const allowed = new Set([owner]);
-    for (const e of tx.edgesTouching(owner))
-      if (e.edge_type === "owns" && e.from_id === owner && tx.getNode(e.to_id)?.kind === "who") allowed.add(e.to_id);
-    return [...new Set(communication.participant_who_ids)].filter((id) => !allowed.has(id));
+    return [...new Set(communication.participant_who_ids)].filter((id) => !this.#ownerReceiverIds.has(id));
   }
 
   #whenIds(tx: GraphTx, loop: Loop): string[] {

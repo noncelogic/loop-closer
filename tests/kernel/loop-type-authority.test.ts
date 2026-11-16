@@ -9,7 +9,7 @@ import { assertValid, experiment, experimentProposal, joe, newKernel, repoRuns, 
 
 const T0 = "2026-11-10T08:00:00Z";
 
-/** Joe's phone: a receiver Joe registered by owning it. */
+/** Joe's phone: one of the owner's registered receivers. */
 const joePhone: Node = {
   id: "lc_who_joe_phone",
   kind: "who",
@@ -28,13 +28,16 @@ const stranger: Node = {
 
 const HASH = `sha256:${"ab".repeat(32)}`;
 
+/** The service owner's receivers as the operator registers them (not as the graph claims them). */
+const OWNER_RECEIVERS = { ownerReceiverIds: [joe.id, joePhone.id] };
+
 async function openNotificationLoop(kernel: Kernel, suffix: string): Promise<string> {
   const what = { ...experiment, id: `lc_what_notify_${suffix}`, attributes: { what_type: "action", title: "Tell Joe the factory is blocked" } };
   const proposed = await kernel.proposeLoop(experimentProposal({
     name: `Factory notification ${suffix}`,
     loop_type: "factory-notification",
     nodes: [joe, joePhone, stranger, what, repoRuns, resultsLand],
-    edges: [{ from_id: joe.id, to_id: joePhone.id, edge_type: "owns" }],
+    edges: [],
     closing_when_id: resultsLand.id,
   }));
   await kernel.acceptLoop(proposed.loop.id, { acceptor: "joe" });
@@ -55,7 +58,7 @@ function outbound(loopId: string, participants: string[]) {
 }
 
 test("a factory-notification loop inherits autonomous authority and other types keep joe-approves-each", async () => {
-  const { kernel, store } = newKernel();
+  const { kernel, store } = newKernel(OWNER_RECEIVERS);
 
   const loopId = await openNotificationLoop(kernel, "a");
   const loop = await kernel.getLoop(loopId);
@@ -68,7 +71,7 @@ test("a factory-notification loop inherits autonomous authority and other types 
   assert.deepEqual([...policy.escalation.stop_conditions], ["ack", "resolve", "answered"]);
   assert.ok("max_attempts" in policy.escalation && "min_interval_seconds" in policy.escalation);
 
-  // must_allow: a send to the owner's receiver (Joe, or a receiver Joe owns) is enqueued without approval.
+  // must_allow: a send to the owner's registered receiver is enqueued without approval.
   for (const receiver of [joe.id, joePhone.id]) {
     const comm = await kernel.recordCommunication(outbound(loopId, [receiver]));
     const result = await kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" });
@@ -92,7 +95,7 @@ test("a factory-notification loop inherits autonomous authority and other types 
 });
 
 test("a factory-notification send to a receiver other than the owner's is refused", async () => {
-  const { kernel, store } = newKernel();
+  const { kernel, store } = newKernel(OWNER_RECEIVERS);
   const loopId = await openNotificationLoop(kernel, "b");
 
   for (const participants of [[stranger.id], [joe.id, stranger.id]]) {
@@ -119,4 +122,52 @@ test("a factory-notification send to a receiver other than the owner's is refuse
     await assert.rejects(kernel.approveSend(comm.id, { approver: "joe" }), (err: unknown) => err instanceof KernelError && err.code === "conflict");
     await assert.rejects(kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" }), (err: unknown) => err instanceof KernelError && err.code === "conflict");
   }
+});
+
+test("caller-supplied graph claims do not make a receiver the owner's", async () => {
+  const { kernel, store } = newKernel(OWNER_RECEIVERS);
+  const what = (suffix: string) => ({ ...experiment, id: `lc_what_claim_${suffix}`, attributes: { what_type: "action", title: "Notify" } });
+
+  // Bypass 1: the outsider is proposed as the loop's accountable Who.
+  const asAccountable = await kernel.proposeLoop(experimentProposal({
+    name: "Factory notification to an outsider as owner",
+    loop_type: "factory-notification",
+    accountable_who_id: stranger.id,
+    nodes: [stranger, what("accountable"), repoRuns, resultsLand],
+    edges: [],
+    closing_when_id: resultsLand.id,
+  }));
+  // Bypass 2: an `owns` edge from Joe to the outsider is written into the graph.
+  const asOwned = await kernel.proposeLoop(experimentProposal({
+    name: "Factory notification to an outsider Joe 'owns'",
+    loop_type: "factory-notification",
+    nodes: [joe, stranger, what("owns"), repoRuns, resultsLand],
+    edges: [{ from_id: joe.id, to_id: stranger.id, edge_type: "owns" }],
+    closing_when_id: resultsLand.id,
+  }));
+
+  for (const proposed of [asAccountable, asOwned]) {
+    const loopId = proposed.loop.id;
+    await kernel.acceptLoop(loopId, { acceptor: "joe" });
+    assert.equal((await kernel.getLoop(loopId)).authority, "autonomous");
+    const comm = await kernel.recordCommunication(outbound(loopId, [stranger.id]));
+    await assert.rejects(
+      kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" }),
+      (err: unknown) => err instanceof KernelError && err.code === "conflict",
+    );
+    const queued = await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id));
+    assert.deepEqual(queued, []);
+    assert.equal((await store.read((tx) => tx.getSendRequest(comm.id)))?.status, "refused");
+  }
+});
+
+test("with no registered owner receivers a factory-notification send is refused", async () => {
+  const { kernel, store } = newKernel();
+  const loopId = await openNotificationLoop(kernel, "c");
+  const comm = await kernel.recordCommunication(outbound(loopId, [joe.id]));
+  await assert.rejects(
+    kernel.requestSend(loopId, { communication_id: comm.id, actor: "agent:sender" }),
+    (err: unknown) => err instanceof KernelError && err.code === "conflict",
+  );
+  assert.deepEqual(await store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.id)), []);
 });

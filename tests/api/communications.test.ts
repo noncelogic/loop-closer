@@ -259,3 +259,52 @@ test("only Joe's own key approves a send; an agent naming Joe is refused and not
   assert.equal((await call("approve_send", path, { approver: "joe" }, "joe")).status, 200);
   assert.equal((await outboxFor(comm["id"])).length, 1);
 });
+
+test("over HTTP, the sender cannot make an outsider an owner's receiver through graph claims", async () => {
+  const outsider = { ...joe, id: "lc_who_outsider", attributes: { ...joe.attributes, name: "Outsider" } };
+  const env = newKernel({ ownerReceiverIds: [joe.id] });
+  const own = createServer({ kernel: env.kernel, apiKeys: KEYS });
+  await new Promise<void>((resolve) => own.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(own.address() as AddressInfo).port}/v1`;
+  const post = async (path: string, body: unknown, principal: string) => {
+    const res = await fetch(`${url}${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEYS.get(principal)!}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json()) as Obj };
+  };
+  try {
+    const bypasses = [
+      // The outsider proposed as the loop's accountable Who.
+      { accountable_who_id: outsider.id, nodes: [outsider], edges: [] },
+      // An `owns` edge from Joe to the outsider.
+      { accountable_who_id: joe.id, nodes: [joe, outsider], edges: [{ from_id: joe.id, to_id: outsider.id, edge_type: "owns" }] },
+    ];
+    for (const [i, b] of bypasses.entries()) {
+      const what = { ...experiment, id: `lc_what_bypass_${i}` };
+      const proposed = await post("/loops/propose", experimentProposal({
+        name: `Bypass ${i}`,
+        loop_type: "factory-notification",
+        accountable_who_id: b.accountable_who_id,
+        nodes: [...b.nodes, what, repoRuns, resultsLand],
+        edges: b.edges as any,
+        actor: "agent:sender",
+      }), "agent:sender");
+      assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
+      const loopId = proposed.body["loop"]["id"] as string;
+      assert.equal((await post(`/loops/${loopId}/accept`, { acceptor: "joe" }, "joe")).status, 200);
+      const comm = await post("/communications", {
+        thread_id: "factory:notify", channel: "message", direction: "outbound", participant_who_ids: [outsider.id],
+        at: "2026-11-10T09:00:00Z", body_pointer: "minio://loopcloser/originals/x", body_hash: HASH, loop_id: loopId,
+      }, "agent:sender");
+      assert.equal(comm.status, 201, JSON.stringify(comm.body));
+      const sent = await post(`/loops/${loopId}/send-requests`, { communication_id: comm.body["id"], actor: "agent:sender" }, "agent:sender");
+      assert.equal(sent.status, 409, `bypass ${i} must be refused, got ${sent.status} ${JSON.stringify(sent.body)}`);
+      const queued = await env.store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === comm.body["id"]));
+      assert.deepEqual(queued, []);
+    }
+  } finally {
+    await new Promise<void>((resolve) => own.close(() => resolve()));
+  }
+});
