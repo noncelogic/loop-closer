@@ -45,11 +45,17 @@ export class Replica {
     this.#compose(["down", "--volumes", "--remove-orphans"], { inherit: true });
   }
 
+  /** The host port the replica's Postgres is published on (ephemeral). */
+  hostPort(): number {
+    const out = this.#compose(["port", "postgres", "5432"]).trim().split("\n")[0] ?? "";
+    const port = Number(out.slice(out.lastIndexOf(":") + 1));
+    if (!Number.isInteger(port) || port <= 0) throw new Error(`no published port for postgres: ${JSON.stringify(out)}`);
+    return port;
+  }
+
   /** Host-side connection URL for a database on the replica (published on an ephemeral port). */
   databaseUrl(database = "loopcloser"): string {
-    const published = this.#compose(["port", "postgres", "5432"]).trim().split("\n")[0] ?? "";
-    const port = published.slice(published.lastIndexOf(":") + 1);
-    return `postgres://loopcloser:loopcloser@127.0.0.1:${port}/${database}`;
+    return `postgres://loopcloser:loopcloser@127.0.0.1:${this.hostPort()}/${database}`;
   }
 
   /** Runs SQL as the database owner (the migration role); returns unaligned tuples-only output. */
