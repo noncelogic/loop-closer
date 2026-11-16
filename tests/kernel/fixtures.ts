@@ -2,7 +2,7 @@
 // subgraph (SPEC B7 Phase 1 worked example, trimmed) and schema checks.
 import assert from "node:assert/strict";
 import { createValidator, SCHEMA_ID_BASE } from "../../src/contracts/index.ts";
-import { InMemoryGraphStore, Kernel, type Node, type ProposeLoopInput } from "../../src/kernel/index.ts";
+import { InMemoryGraphStore, Kernel, type KernelOptions, type Node, type ProposeLoopInput } from "../../src/kernel/index.ts";
 
 const ajv = createValidator();
 
@@ -12,13 +12,14 @@ export function assertValid(object: "loop" | "ledger-event" | "node" | "edge", v
   assert.ok(validate(value), `${object} should match its schema: ${ajv.errorsText(validate.errors)}`);
 }
 
-export function newKernel(): { kernel: Kernel; store: InMemoryGraphStore; tick: (seconds: number) => void } {
+export function newKernel(options: KernelOptions = {}): { kernel: Kernel; store: InMemoryGraphStore; tick: (seconds: number) => void } {
   let now = Date.parse("2026-11-10T09:00:00Z");
   let seq = 0;
   const store = new InMemoryGraphStore();
   const kernel = new Kernel(store, {
     now: () => new Date(now),
     newId: (prefix) => `lc_${prefix}_${++seq}`,
+    ...options,
   });
   return { kernel, store, tick: (seconds) => void (now += seconds * 1000) };
 }

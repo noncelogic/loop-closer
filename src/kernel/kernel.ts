@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createValidator, SCHEMA_ID_BASE } from "../contracts/index.ts";
 import { anchorCalendarWhen } from "../timer/schedule.ts";
+import { DEFAULT_AUTHORITY, LOOP_TYPE_POLICIES, loopTypePolicy, type LoopTypePolicy } from "./policies.ts";
 import type { GraphStore, GraphTx } from "./store.ts";
 import type {
   AcceptLoopInput,
@@ -57,8 +58,18 @@ export interface KernelOptions {
   now?: () => Date;
   /** Returns a fresh `lc_…` id; `prefix` names the record kind (loop, edge, evt). */
   newId?: (prefix: string) => string;
-  /** Policy refs cited by new loops until loop-type policies (SPEC B4) exist. */
+  /** Policy refs cited by new loops whose type has no loop-type policy (SPEC B4). */
   defaultPolicyRefs?: { ageing: PolicyRef; escalation: PolicyRef };
+  /** Loop-type policies (SPEC B4); defaults to LOOP_TYPE_POLICIES. */
+  loopTypePolicies?: readonly LoopTypePolicy[];
+  /**
+   * The service owner's registered receivers (Who ids), set by the operator
+   * when the service starts. They are the only receivers an `owner_only` loop
+   * type may send to; nothing a caller writes into the graph (the loop's
+   * accountable Who, `owns` edges) adds to them. Defaults to none: every
+   * `owner_only` send is refused until receivers are registered.
+   */
+  ownerReceiverIds?: readonly string[];
 }
 
 const DEFAULT_POLICY_REFS = {
@@ -100,6 +111,8 @@ export class Kernel {
   readonly #now: () => Date;
   readonly #newId: (prefix: string) => string;
   readonly #policyRefs: { ageing: PolicyRef; escalation: PolicyRef };
+  readonly #loopTypePolicies: readonly LoopTypePolicy[];
+  readonly #ownerReceiverIds: ReadonlySet<string>;
   readonly #ajv = createValidator();
 
   constructor(store: GraphStore, options: KernelOptions = {}) {
@@ -107,6 +120,8 @@ export class Kernel {
     this.#now = options.now ?? (() => new Date());
     this.#newId = options.newId ?? ((prefix) => `lc_${prefix}_${randomUUID()}`);
     this.#policyRefs = options.defaultPolicyRefs ?? DEFAULT_POLICY_REFS;
+    this.#loopTypePolicies = options.loopTypePolicies ?? LOOP_TYPE_POLICIES;
+    this.#ownerReceiverIds = new Set(options.ownerReceiverIds ?? []);
   }
 
   // ---- intake -------------------------------------------------------------
@@ -194,6 +209,10 @@ export class Kernel {
         edgeIds.push(edge.id);
       }
 
+      // The loop inherits its type's authority and escalation policy (SPEC B2.6, B4).
+      const policy = loopTypePolicy(input.loop_type, this.#loopTypePolicies);
+      const policyRefs = structuredClone(this.#policyRefs);
+      if (policy) policyRefs.escalation = { id: policy.escalation.id, version: policy.escalation.version };
       const loop: Loop = {
         id: this.#newId("loop"),
         name: input.name,
@@ -202,14 +221,18 @@ export class Kernel {
         accountable_who_id: accountable.id,
         member_node_ids: [...members.keys()],
         closing_when_id: closingWhenId,
-        authority: "joe-approves-each",
+        authority: policy?.authority ?? DEFAULT_AUTHORITY,
         opened_at: null,
         closed_at: null,
         close_reason: null,
+<<<<<<< HEAD
         policy_refs: structuredClone(this.#policyRefs),
         ...(input.key_result_ref === undefined
           ? {}
           : { key_result_ref: { system: input.key_result_ref.system, id: input.key_result_ref.id } }),
+=======
+        policy_refs: policyRefs,
+>>>>>>> origin/main
       };
       this.#check("loop", loop, "bad_request");
       tx.putLoop(loop);
@@ -398,10 +421,12 @@ export class Kernel {
    * request_send (SPEC B2.6): the sender asks to send an outbound draft of the
    * loop. Only `autonomous` authority enqueues the send; any other authority
    * (default joe-approves-each) records a pending approval and sends nothing.
-   * One request per communication.
+   * Where the loop type's policy limits receivers to the owner's own, a send
+   * addressed to anyone else is refused: the refusal is recorded (a `refused`
+   * send request) and nothing is sent. One request per communication.
    */
-  requestSend(loopId: string, input: RequestSendInput): Promise<SendRequestResult> {
-    return this.#store.transaction((tx) => {
+  async requestSend(loopId: string, input: RequestSendInput): Promise<SendRequestResult> {
+    const outcome = await this.#store.transaction((tx): SendRequestResult | { refused: SendRequest } => {
       const loop = this.#loop(tx, loopId);
       const communication = this.#communication(tx, input.communication_id);
       if (communication.loop_id !== loop.id)
@@ -422,6 +447,12 @@ export class Kernel {
         requested_by: input.actor,
         requested_at: this.#at(),
       };
+      const outsiders = this.#receiversOutsideScope(loop, communication);
+      if (outsiders.length > 0) {
+        const refused: SendRequest = { ...request, status: "refused", refused_receiver_ids: outsiders };
+        tx.putSendRequest(refused);
+        return { refused };
+      }
       tx.putSendRequest(request);
       if (loop.authority === "autonomous") {
         this.#release(tx, communication, request, input.actor, { released_by: "autonomous" });
@@ -429,6 +460,15 @@ export class Kernel {
       }
       return { communication_id: communication.id, authority: loop.authority, status: "pending_approval" };
     });
+    if ("refused" in outcome) {
+      const ids = outcome.refused.refused_receiver_ids ?? [];
+      throw new KernelError(
+        "conflict",
+        `loop ${loopId} may send only to its owner's receivers; refused ${ids.join(", ")}`,
+        { refused_receiver_ids: ids },
+      );
+    }
+    return outcome;
   }
 
   /**
@@ -581,6 +621,19 @@ export class Kernel {
     });
     tx.putSendRequest({ ...request, status: "enqueued" });
     return ledger_event;
+  }
+
+  /**
+   * Receivers of `communication` the loop's type does not allow. Under an
+   * `owner_only` scope the allowed receivers are exactly the service owner's
+   * registered receivers (KernelOptions.ownerReceiverIds). Graph claims a
+   * caller can write (the loop's accountable Who, `owns` edges) grant nothing.
+   * Under `any` (the default) none are refused.
+   */
+  #receiversOutsideScope(loop: Loop, communication: Communication): string[] {
+    const policy = loopTypePolicy(loop.loop_type, this.#loopTypePolicies);
+    if (policy?.receivers !== "owner_only") return [];
+    return [...new Set(communication.participant_who_ids)].filter((id) => !this.#ownerReceiverIds.has(id));
   }
 
   #whenIds(tx: GraphTx, loop: Loop): string[] {

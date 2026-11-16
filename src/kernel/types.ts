@@ -196,22 +196,25 @@ export interface ApproveSendInput {
 
 /**
  * A request_send on one communication: `pending_approval` until Joe approves it
- * (joe-approves-each), `enqueued` once the send is in the outbox.
+ * (joe-approves-each), `enqueued` once the send is in the outbox, `refused`
+ * when the loop type's receiver scope forbids a receiver (never sent).
  */
 export interface SendRequest {
   communication_id: string;
   loop_id: string;
   authority: Authority;
-  status: "pending_approval" | "enqueued";
+  status: "pending_approval" | "enqueued" | "refused";
   requested_by: string;
   requested_at: string;
+  /** Set on a refused request: the receivers outside the loop type's scope. */
+  refused_receiver_ids?: string[];
 }
 
 /** OpenAPI SendRequestResult. */
 export interface SendRequestResult {
   communication_id: string;
   authority: Authority;
-  status: SendRequest["status"];
+  status: "pending_approval" | "enqueued";
 }
 
 /** OpenAPI ApproveSendResult. */
