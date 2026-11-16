@@ -79,11 +79,11 @@ async function call(principal: string, method: "GET" | "POST", path: string, bod
 
 /** Everything the store holds that a call could change. */
 const snapshot = () =>
-  store.read((tx) => ({
-    nodes: tx.listNodes(),
-    loops: tx.listLoops(),
-    ledger: tx.ledger(),
-    outbox: tx.outbox(),
+  store.read(async (tx) => ({
+    nodes: await tx.listNodes(),
+    loops: await tx.listLoops(),
+    ledger: await tx.ledger(),
+    outbox: await tx.outbox(),
   }));
 
 let seq = 0;
@@ -99,7 +99,7 @@ async function openLoop(authority: Authority = "joe-approves-each"): Promise<str
   assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
   const loopId = proposed.body["loop"]["id"] as string;
   assert.equal((await call("agent:juno", "POST", `/loops/${loopId}/accept`, { acceptor: "joe" })).status, 200);
-  if (authority !== "joe-approves-each") await store.transaction((tx) => tx.putLoop({ ...tx.getLoop(loopId)!, authority }));
+  if (authority !== "joe-approves-each") await store.transaction(async (tx) => tx.putLoop({ ...(await tx.getLoop(loopId))!, authority }));
   return loopId;
 }
 
@@ -180,7 +180,7 @@ test("chaser and drafter principals get 403 from request_send and nothing is enq
   const loopId = await openLoop("autonomous");
   const communicationId = await draft(loopId);
   const path = `/loops/${loopId}/send-requests`;
-  const outbox = () => store.read((tx) => tx.outbox().filter((e) => e.payload["communication_id"] === communicationId));
+  const outbox = () => store.read(async (tx) => (await tx.outbox()).filter((e) => e.payload["communication_id"] === communicationId));
   calls.length = 0;
 
   for (const principal of ["agent:chaser", "agent:drafter"]) {

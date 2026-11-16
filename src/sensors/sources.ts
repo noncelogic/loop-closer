@@ -103,11 +103,11 @@ export class CalendarSource {
       });
       // Advance only if nobody else moved it meanwhile. A crash between the
       // firing and this write re-fires the same slot key next poll: a no-op.
-      await this.#store.transaction((tx) => {
-        const current = tx.getNode(when.id);
+      await this.#store.transaction(async (tx) => {
+        const current = await tx.getNode(when.id);
         if (current?.attributes["next_fire_at"] !== scheduledFor) return;
         const pinned = advance.schedule ? { schedule: advance.schedule } : {};
-        tx.putNode({ ...current, attributes: { ...current.attributes, next_fire_at: next, ...pinned } });
+        await tx.putNode({ ...current, attributes: { ...current.attributes, next_fire_at: next, ...pinned } });
       });
       fired.push({
         when_id: when.id,
@@ -123,9 +123,8 @@ export class CalendarSource {
   }
 }
 
-function dueCalendarWhens(tx: GraphTx, now: Date): Node[] {
-  return tx
-    .listNodes()
+async function dueCalendarWhens(tx: GraphTx, now: Date): Promise<Node[]> {
+  return (await tx.listNodes())
     .filter((n) => {
       const next = n.attributes["next_fire_at"];
       return (
@@ -225,8 +224,8 @@ export class PortalReadSource {
   }
 
   /** The latest status change this sensor recorded for `subject`. */
-  #lastRecorded(tx: GraphTx, subject: string): { status: string; event_id: string } | undefined {
-    const ledger = tx.ledger();
+  async #lastRecorded(tx: GraphTx, subject: string): Promise<{ status: string; event_id: string } | undefined> {
+    const ledger = await tx.ledger();
     for (let i = ledger.length - 1; i >= 0; i--) {
       const e = ledger[i]!;
       if (e.event_type !== "when_fired" || e.actor !== this.sensor.actor || e.payload["event_type"] !== this.#config.event_type) continue;

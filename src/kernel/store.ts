@@ -7,23 +7,28 @@
 // behind the same interface.
 import type { Communication, Edge, LedgerEvent, Loop, Node, OutboxEntry, SendRequest } from "./types.ts";
 
-/** Operations available inside one transaction. */
+/**
+ * Operations available inside one transaction. Every method returns a Promise
+ * the caller awaits, so a store whose reads and writes are network queries
+ * (Postgres) can implement it. A rejected call fails the transaction: the
+ * store rolls back everything written in it.
+ */
 export interface GraphTx {
-  getNode(id: string): Node | undefined;
-  putNode(node: Node): void;
-  listNodes(): Node[];
-  getEdge(id: string): Edge | undefined;
-  putEdge(edge: Edge): void;
+  getNode(id: string): Promise<Node | undefined>;
+  putNode(node: Node): Promise<void>;
+  listNodes(): Promise<Node[]>;
+  getEdge(id: string): Promise<Edge | undefined>;
+  putEdge(edge: Edge): Promise<void>;
   /** Active edges with `nodeId` at either end. */
-  edgesTouching(nodeId: string): Edge[];
-  getLoop(id: string): Loop | undefined;
-  putLoop(loop: Loop): void;
-  listLoops(): Loop[];
+  edgesTouching(nodeId: string): Promise<Edge[]>;
+  getLoop(id: string): Promise<Loop | undefined>;
+  putLoop(loop: Loop): Promise<void>;
+  listLoops(): Promise<Loop[]>;
   /** Appends; the ledger is never edited. Idempotency keys are unique across the ledger. */
-  appendEvent(event: LedgerEvent): void;
-  findEventByIdempotencyKey(key: string): LedgerEvent | undefined;
+  appendEvent(event: LedgerEvent): Promise<void>;
+  findEventByIdempotencyKey(key: string): Promise<LedgerEvent | undefined>;
   /** The full ledger in append order. */
-  ledger(): LedgerEvent[];
+  ledger(): Promise<LedgerEvent[]>;
   /**
    * Up to `limit` events committed after commit position `position`, in commit
    * order, and the position after the last of them (`position` itself when
@@ -31,20 +36,24 @@ export interface GraphTx {
    * count of events committed before it. Undefined when `position` lies beyond
    * the committed ledger, so it was never handed out.
    */
-  ledgerAfter(position: number, limit: number): { events: LedgerEvent[]; position: number } | undefined;
-  getCommunication(id: string): Communication | undefined;
-  putCommunication(communication: Communication): void;
+  ledgerAfter(position: number, limit: number): Promise<{ events: LedgerEvent[]; position: number } | undefined>;
+  getCommunication(id: string): Promise<Communication | undefined>;
+  putCommunication(communication: Communication): Promise<void>;
   /** The send request on a communication, if one was made. */
-  getSendRequest(communicationId: string): SendRequest | undefined;
-  putSendRequest(request: SendRequest): void;
+  getSendRequest(communicationId: string): Promise<SendRequest | undefined>;
+  putSendRequest(request: SendRequest): Promise<void>;
   /** Adds a side effect to the transactional outbox; it commits with the transaction. */
-  enqueue(entry: OutboxEntry): void;
+  enqueue(entry: OutboxEntry): Promise<void>;
   /** The outbox in enqueue order. */
-  outbox(): OutboxEntry[];
+  outbox(): Promise<OutboxEntry[]>;
 }
 
 export interface GraphStore {
-  /** Runs `fn` atomically: every write commits, or (on throw) none does. Transactions are serialised. */
+  /**
+   * Runs `fn` atomically: every write commits, or (on throw, or a rejected
+   * GraphTx call) none does. Transactions are serialised. `fn` awaits every
+   * GraphTx call it makes before it returns.
+   */
   transaction<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T>;
   /** A read-only view; writes inside it are rejected. */
   read<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T>;
@@ -92,14 +101,26 @@ export class InMemoryGraphStore implements GraphStore {
   transaction<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T> {
     return this.#serialise(async () => {
       const working = cloneState(this.#state);
-      const result = await fn(this.#tx(working, true));
-      this.#state = working; // commit
-      return result;
+      const view = this.#tx(working, true);
+      try {
+        const result = await fn(view.tx);
+        this.#state = working; // commit
+        return result;
+      } finally {
+        view.close();
+      }
     });
   }
 
   read<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T> {
-    return this.#serialise(async () => fn(this.#tx(this.#state, false)));
+    return this.#serialise(async () => {
+      const view = this.#tx(this.#state, false);
+      try {
+        return await fn(view.tx);
+      } finally {
+        view.close();
+      }
+    });
   }
 
   #serialise<T>(run: () => Promise<T>): Promise<T> {
@@ -108,22 +129,34 @@ export class InMemoryGraphStore implements GraphStore {
     return next;
   }
 
-  #tx(s: State, writable: boolean): GraphTx {
+  /**
+   * The GraphTx over `s`. Each call settles asynchronously, like a query would;
+   * once the transaction or read is over (`close`) every call rejects, so a
+   * write the caller forgot to await cannot land after commit or rollback.
+   */
+  #tx(s: State, writable: boolean): { tx: GraphTx; close: () => void } {
+    let open = true;
+    const live = (): void => {
+      if (!open) throw new Error("transaction is already over");
+    };
     const write = (): void => {
+      live();
       if (!writable) throw new Error("write attempted in a read-only view");
     };
-    return {
-      getNode: (id) => copy(s.nodes.get(id)),
-      putNode: (node) => (write(), void s.nodes.set(node.id, copy(node))),
-      listNodes: () => [...s.nodes.values()].map(copy),
-      getEdge: (id) => copy(s.edges.get(id)),
-      putEdge: (edge) => (write(), void s.edges.set(edge.id, copy(edge))),
-      edgesTouching: (nodeId) =>
-        [...s.edges.values()].filter((e) => e.status === "active" && (e.from_id === nodeId || e.to_id === nodeId)).map(copy),
-      getLoop: (id) => copy(s.loops.get(id)),
-      putLoop: (loop) => (write(), void s.loops.set(loop.id, copy(loop))),
-      listLoops: () => [...s.loops.values()].map(copy),
-      appendEvent: (event) => {
+    const tx: GraphTx = {
+      getNode: async (id) => (live(), copy(s.nodes.get(id))),
+      putNode: async (node) => (write(), void s.nodes.set(node.id, copy(node))),
+      listNodes: async () => (live(), [...s.nodes.values()].map(copy)),
+      getEdge: async (id) => (live(), copy(s.edges.get(id))),
+      putEdge: async (edge) => (write(), void s.edges.set(edge.id, copy(edge))),
+      edgesTouching: async (nodeId) => (
+        live(),
+        [...s.edges.values()].filter((e) => e.status === "active" && (e.from_id === nodeId || e.to_id === nodeId)).map(copy)
+      ),
+      getLoop: async (id) => (live(), copy(s.loops.get(id))),
+      putLoop: async (loop) => (write(), void s.loops.set(loop.id, copy(loop))),
+      listLoops: async () => (live(), [...s.loops.values()].map(copy)),
+      appendEvent: async (event) => {
         write();
         if (event.idempotency_key !== null) {
           if (s.idempotency.has(event.idempotency_key))
@@ -132,19 +165,21 @@ export class InMemoryGraphStore implements GraphStore {
         }
         s.ledger.push(copy(event));
       },
-      findEventByIdempotencyKey: (key) => copy(s.idempotency.get(key)),
-      ledger: () => s.ledger.map(copy),
-      ledgerAfter: (position, limit) => {
+      findEventByIdempotencyKey: async (key) => (live(), copy(s.idempotency.get(key))),
+      ledger: async () => (live(), s.ledger.map(copy)),
+      ledgerAfter: async (position, limit) => {
+        live();
         if (!Number.isSafeInteger(position) || position < 0 || position > s.ledger.length) return undefined;
         const events = s.ledger.slice(position, position + Math.max(0, limit)).map(copy);
         return { events, position: position + events.length };
       },
-      getCommunication: (id) => copy(s.communications.get(id)),
-      putCommunication: (communication) => (write(), void s.communications.set(communication.id, copy(communication))),
-      getSendRequest: (id) => copy(s.sendRequests.get(id)),
-      putSendRequest: (request) => (write(), void s.sendRequests.set(request.communication_id, copy(request))),
-      enqueue: (entry) => (write(), void s.outbox.push(copy(entry))),
-      outbox: () => s.outbox.map(copy),
+      getCommunication: async (id) => (live(), copy(s.communications.get(id))),
+      putCommunication: async (communication) => (write(), void s.communications.set(communication.id, copy(communication))),
+      getSendRequest: async (id) => (live(), copy(s.sendRequests.get(id))),
+      putSendRequest: async (request) => (write(), void s.sendRequests.set(request.communication_id, copy(request))),
+      enqueue: async (entry) => (write(), void s.outbox.push(copy(entry))),
+      outbox: async () => (live(), s.outbox.map(copy)),
     };
+    return { tx, close: () => void (open = false) };
   }
 }

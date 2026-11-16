@@ -58,9 +58,9 @@ test("proposes a loop under an identity granted propose_loop", async () => {
 });
 
 test("refuses a proposal from an identity without the propose_loop grant", async () => {
-  const eventsBefore = await store.read((tx) => tx.ledger().length);
+  const eventsBefore = await store.read(async (tx) => (await tx.ledger()).length);
   const refused = await propose("agent:drafter", 2);
   assert.equal(refused.status, 403, JSON.stringify(refused.body));
   assert.equal(refused.body["error"], "forbidden");
-  assert.equal(await store.read((tx) => tx.ledger().length), eventsBefore, "a refused proposal records nothing");
+  assert.equal(await store.read(async (tx) => (await tx.ledger()).length), eventsBefore, "a refused proposal records nothing");
 });

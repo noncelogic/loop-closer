@@ -133,7 +133,7 @@ export class Kernel {
    * the subgraph and a `proposed` Loop with its loop_proposed ledger event.
    */
   proposeLoop(input: ProposeLoopInput): Promise<LoopWithEvent> {
-    return this.#store.transaction((tx) => {
+    return this.#store.transaction(async (tx) => {
       const at = this.#at();
       const members = new Map<string, Node>();
       const created: Node[] = [];
@@ -141,13 +141,13 @@ export class Kernel {
         // A recurring calendar When is stored with its recurrence anchor (LC-M2-T1c).
         const entry = isRef(proposed) || proposed.kind !== "when" ? proposed : { ...proposed, attributes: anchorCalendarWhen(proposed.attributes) };
         if (isRef(entry)) {
-          const existing = tx.getNode(entry.ref);
+          const existing = await tx.getNode(entry.ref);
           if (!existing) throw new KernelError("not_found", `node ${entry.ref} does not exist`);
           members.set(existing.id, existing);
           continue;
         }
         this.#check("node", entry, "bad_request");
-        const existing = tx.getNode(entry.id);
+        const existing = await tx.getNode(entry.id);
         if (existing && !isDeepStrictEqual(existing, entry))
           throw new KernelError("conflict", `node ${entry.id} already exists with different content; reference it with { ref }`);
         if (!existing) created.push(entry);
@@ -156,7 +156,7 @@ export class Kernel {
 
       let accountable = members.get(input.accountable_who_id);
       if (!accountable) {
-        accountable = tx.getNode(input.accountable_who_id);
+        accountable = await tx.getNode(input.accountable_who_id);
         if (!accountable) throw new KernelError("not_found", `accountable Who ${input.accountable_who_id} does not exist`);
         members.set(accountable.id, accountable);
       }
@@ -176,8 +176,7 @@ export class Kernel {
           throw new KernelError("bad_request", `edge ${e.from_id} -${e.edge_type}-> ${e.to_id} leaves the proposed subgraph`);
 
       // Dedup check, before anything is admitted.
-      const duplicates = tx
-        .listLoops()
+      const duplicates = (await tx.listLoops())
         .filter(
           (l) =>
             !CLOSED.has(l.state) &&
@@ -192,7 +191,7 @@ export class Kernel {
           { existing_loop_ids: duplicates },
         );
 
-      for (const n of created) tx.putNode(n);
+      for (const n of created) await tx.putNode(n);
       const edgeIds: string[] = [];
       for (const e of input.edges) {
         const edge: Edge = {
@@ -206,7 +205,7 @@ export class Kernel {
           status: "active",
         };
         this.#check("edge", edge, "bad_request");
-        tx.putEdge(edge);
+        await tx.putEdge(edge);
         edgeIds.push(edge.id);
       }
 
@@ -232,8 +231,8 @@ export class Kernel {
           : { key_result_ref: { system: input.key_result_ref.system, id: input.key_result_ref.id } }),
       };
       this.#check("loop", loop, "bad_request");
-      tx.putLoop(loop);
-      const ledger_event = this.#append(tx, {
+      await tx.putLoop(loop);
+      const ledger_event = await this.#append(tx, {
         at,
         actor: input.actor,
         event_type: "loop_proposed",
@@ -247,15 +246,15 @@ export class Kernel {
 
   /** accept_loop: proposed → open; the loop's Whens become armed. */
   acceptLoop(loopId: string, input: AcceptLoopInput): Promise<LoopWithEvent> {
-    return this.#store.transaction((tx) => {
-      const loop = this.#loop(tx, loopId);
+    return this.#store.transaction(async (tx) => {
+      const loop = await this.#loop(tx, loopId);
       if (loop.state !== "proposed")
         throw new KernelError("conflict", `loop ${loopId} is ${loop.state}; only a proposed loop can be accepted`);
       const at = this.#at();
       const next: Loop = { ...loop, state: "open", opened_at: at };
       this.#check("loop", next);
-      tx.putLoop(next);
-      const ledger_event = this.#append(tx, {
+      await tx.putLoop(next);
+      const ledger_event = await this.#append(tx, {
         at,
         actor: input.acceptor,
         event_type: "loop_accepted",
@@ -269,15 +268,15 @@ export class Kernel {
 
   /** reject_loop: proposed → closed_with_reason (rejected) at intake; the ledger event is kept. */
   rejectLoop(loopId: string, input: RejectLoopInput): Promise<LoopWithEvent> {
-    return this.#store.transaction((tx) => {
-      const loop = this.#loop(tx, loopId);
+    return this.#store.transaction(async (tx) => {
+      const loop = await this.#loop(tx, loopId);
       if (loop.state !== "proposed")
         throw new KernelError("conflict", `loop ${loopId} is ${loop.state}; only a proposed loop can be rejected`);
       const at = this.#at();
       const next: Loop = { ...loop, state: "closed_with_reason", closed_at: at, close_reason: "rejected" };
       this.#check("loop", next);
-      tx.putLoop(next);
-      const ledger_event = this.#append(tx, {
+      await tx.putLoop(next);
+      const ledger_event = await this.#append(tx, {
         at,
         actor: input.actor,
         event_type: "loop_rejected",
@@ -293,17 +292,17 @@ export class Kernel {
 
   /** transition: a validated state change + ledger event, atomically; a replayed idempotency key applies once. */
   transition(loopId: string, input: TransitionInput): Promise<TransitionResult> {
-    return this.#store.transaction((tx) => {
-      const prior = tx.findEventByIdempotencyKey(input.idempotency_key);
+    return this.#store.transaction(async (tx) => {
+      const prior = await tx.findEventByIdempotencyKey(input.idempotency_key);
       if (prior) {
         const same =
           prior.event_type === "transition" &&
           prior.subject_ids[0] === loopId &&
           prior.payload["to_state"] === input.to_state;
         if (!same) throw new KernelError("conflict", `idempotency key ${input.idempotency_key} was already used for a different change`);
-        return { loop: this.#loop(tx, loopId), ledger_event: prior, applied: false };
+        return { loop: await this.#loop(tx, loopId), ledger_event: prior, applied: false };
       }
-      const loop = this.#loop(tx, loopId);
+      const loop = await this.#loop(tx, loopId);
       if (input.to_state === "closed_with_reason") {
         if (!input.close_reason) throw new KernelError("bad_request", "closed_with_reason needs a close_reason");
         if (input.close_reason === "rejected")
@@ -311,7 +310,7 @@ export class Kernel {
       } else if (input.close_reason !== undefined) {
         throw new KernelError("bad_request", `close_reason only applies to closed_with_reason, not ${input.to_state}`);
       }
-      const { loop: next, ledger_event } = this.#move(tx, loop, input.to_state, {
+      const { loop: next, ledger_event } = await this.#move(tx, loop, input.to_state, {
         actor: input.actor,
         evidence: input.evidence,
         idempotency_key: input.idempotency_key,
@@ -328,8 +327,8 @@ export class Kernel {
    * replayed idempotency key applies once. Workflow runs arrive with templates.
    */
   fireEvent(input: FireEventInput): Promise<FireEventResult> {
-    return this.#store.transaction((tx) => {
-      const prior = tx.findEventByIdempotencyKey(input.idempotency_key);
+    return this.#store.transaction(async (tx) => {
+      const prior = await tx.findEventByIdempotencyKey(input.idempotency_key);
       if (prior) {
         if (prior.event_type !== "when_fired")
           throw new KernelError("conflict", `idempotency key ${input.idempotency_key} was already used for a different change`);
@@ -338,11 +337,11 @@ export class Kernel {
 
       let whens: Node[];
       if ("when_id" in input) {
-        const when = tx.getNode(input.when_id);
+        const when = await tx.getNode(input.when_id);
         if (!when || when.kind !== "when") throw new KernelError("not_found", `When ${input.when_id} does not exist`);
         whens = [when];
       } else {
-        whens = tx.listNodes().filter((n) => {
+        whens = (await tx.listNodes()).filter((n) => {
           const a = n.attributes;
           const binding = a["source_binding"] as { source?: unknown } | undefined;
           return n.kind === "when" && n.status === "active" && a["when_type"] === "event" &&
@@ -359,15 +358,16 @@ export class Kernel {
         const fireCount = typeof when.attributes["fire_count"] === "number" ? when.attributes["fire_count"] : 0;
         const fired: Node = { ...when, attributes: { ...when.attributes, fired_at: at, fire_count: fireCount + 1 } };
         this.#check("node", fired);
-        tx.putNode(fired);
+        await tx.putNode(fired);
       }
 
-      const effects = whens.flatMap((w) => this.#effectsOfWhen(tx, w.id));
+      const effects: FiringEffect[] = [];
+      for (const w of whens) effects.push(...(await this.#effectsOfWhen(tx, w.id)));
       const loopIds = [...new Set(effects.map((e) => e.loop_id))];
       const payload: Record<string, unknown> = { when_ids: whens.map((w) => w.id), loop_ids: loopIds };
       if ("event_type" in input) Object.assign(payload, { event_type: input.event_type, source: input.source });
       if (input.payload !== undefined) payload["event_payload"] = input.payload;
-      const ledger_event = this.#append(tx, {
+      const ledger_event = await this.#append(tx, {
         at,
         actor,
         event_type: "when_fired",
@@ -379,9 +379,9 @@ export class Kernel {
       const evidence = { kind: "ledger_event", id: ledger_event.id } as const;
       for (const effect of effects) {
         if (!effect.next_state) continue;
-        const loop = this.#loop(tx, effect.loop_id);
+        const loop = await this.#loop(tx, effect.loop_id);
         if (loop.state === effect.next_state || !LOOP_TRANSITIONS[loop.state].includes(effect.next_state)) continue;
-        this.#move(tx, loop, effect.next_state, { actor, evidence, idempotency_key: null, close_reason: null });
+        await this.#move(tx, loop, effect.next_state, { actor, evidence, idempotency_key: null, close_reason: null });
       }
       return { ledger_event, applied: true, loop_ids: loopIds, workflow_runs: [] };
     });
@@ -396,13 +396,13 @@ export class Kernel {
    * released, which writes communication_sent.
    */
   recordCommunication(input: RecordCommunicationInput): Promise<Communication> {
-    return this.#store.transaction((tx) => {
-      this.#loop(tx, input.loop_id);
+    return this.#store.transaction(async (tx) => {
+      await this.#loop(tx, input.loop_id);
       const communication: Communication = { id: this.#newId("comm"), ...input, sent_under_authority: null };
       this.#check("communication", communication, "bad_request");
-      tx.putCommunication(communication);
+      await tx.putCommunication(communication);
       if (communication.direction === "inbound")
-        this.#append(tx, {
+        await this.#append(tx, {
           at: this.#at(),
           actor: "system:record_communication",
           event_type: "communication_received",
@@ -423,16 +423,16 @@ export class Kernel {
    * send request) and nothing is sent. One request per communication.
    */
   async requestSend(loopId: string, input: RequestSendInput): Promise<SendRequestResult> {
-    const outcome = await this.#store.transaction((tx): SendRequestResult | { refused: SendRequest } => {
-      const loop = this.#loop(tx, loopId);
-      const communication = this.#communication(tx, input.communication_id);
+    const outcome = await this.#store.transaction(async (tx): Promise<SendRequestResult | { refused: SendRequest }> => {
+      const loop = await this.#loop(tx, loopId);
+      const communication = await this.#communication(tx, input.communication_id);
       if (communication.loop_id !== loop.id)
         throw new KernelError("conflict", `communication ${communication.id} belongs to loop ${communication.loop_id}, not ${loop.id}`);
       if (communication.direction !== "outbound")
         throw new KernelError("conflict", `communication ${communication.id} is inbound; only an outbound draft can be sent`);
       if (!ARMED.has(loop.state))
         throw new KernelError("conflict", `loop ${loop.id} is ${loop.state}; sends are requested only on open loops`);
-      const prior = tx.getSendRequest(communication.id);
+      const prior = await tx.getSendRequest(communication.id);
       if (prior)
         throw new KernelError("conflict", `a send of communication ${communication.id} was already requested (${prior.status})`);
 
@@ -447,12 +447,12 @@ export class Kernel {
       const outsiders = this.#receiversOutsideScope(loop, communication);
       if (outsiders.length > 0) {
         const refused: SendRequest = { ...request, status: "refused", refused_receiver_ids: outsiders };
-        tx.putSendRequest(refused);
+        await tx.putSendRequest(refused);
         return { refused };
       }
-      tx.putSendRequest(request);
+      await tx.putSendRequest(request);
       if (loop.authority === "autonomous") {
-        this.#release(tx, communication, request, input.actor, { released_by: "autonomous" });
+        await this.#release(tx, communication, request, input.actor, { released_by: "autonomous" });
         return { communication_id: communication.id, authority: loop.authority, status: "enqueued" };
       }
       return { communication_id: communication.id, authority: loop.authority, status: "pending_approval" };
@@ -473,16 +473,16 @@ export class Kernel {
    * pending approval can be released, and only once.
    */
   approveSend(communicationId: string, input: ApproveSendInput): Promise<ApproveSendResult> {
-    return this.#store.transaction((tx) => {
-      const communication = this.#communication(tx, communicationId);
-      const request = tx.getSendRequest(communicationId);
+    return this.#store.transaction(async (tx) => {
+      const communication = await this.#communication(tx, communicationId);
+      const request = await tx.getSendRequest(communicationId);
       if (!request) throw new KernelError("conflict", `no send of communication ${communicationId} is awaiting approval`);
       if (request.status !== "pending_approval")
         throw new KernelError("conflict", `communication ${communicationId} is already ${request.status}`);
-      const loop = this.#loop(tx, request.loop_id);
+      const loop = await this.#loop(tx, request.loop_id);
       if (!ARMED.has(loop.state))
         throw new KernelError("conflict", `loop ${loop.id} is ${loop.state}; its sends are no longer released`);
-      const ledger_event = this.#release(tx, communication, request, input.approver, { approved_by: input.approver });
+      const ledger_event = await this.#release(tx, communication, request, input.approver, { approved_by: input.approver });
       return { communication_id: communicationId, status: "released", ledger_event };
     });
   }
@@ -491,11 +491,10 @@ export class Kernel {
 
   /** open_loops: every non-closed loop matching the filters, with age and governing Whens. */
   openLoops(filter: OpenLoopsFilter = {}): Promise<{ loops: OpenLoop[] }> {
-    return this.#store.read((tx) => {
+    return this.#store.read(async (tx) => {
       const now = this.#now().getTime();
-      const ledger = tx.ledger();
-      const loops = tx
-        .listLoops()
+      const ledger = await tx.ledger();
+      const matching = (await tx.listLoops())
         .filter((l) => !CLOSED.has(l.state))
         .filter((l) => filter.accountable_who_id === undefined || l.accountable_who_id === filter.accountable_who_id)
         .filter((l) => filter.loop_type === undefined || l.loop_type === filter.loop_type)
@@ -504,21 +503,22 @@ export class Kernel {
           (l) =>
             filter.key_result_ref === undefined ||
             (l.key_result_ref?.system === filter.key_result_ref.system && l.key_result_ref.id === filter.key_result_ref.id),
-        )
-        .map((loop): OpenLoop => {
-          const since =
-            loop.opened_at ??
-            ledger.find((e) => e.event_type === "loop_proposed" && e.subject_ids[0] === loop.id)?.at ??
-            new Date(now).toISOString();
-          return {
-            loop,
-            age_seconds: Math.max(0, Math.floor((now - Date.parse(since)) / 1000)),
-            governing_when_ids: this.#whenIds(tx, loop),
-            // Ageing policies (SPEC B4) are not evaluated yet, so nothing is breaching.
-            breaching: false,
-          };
-        })
-        .filter((l) => !filter.breaching_only || l.breaching);
+        );
+      const loops: OpenLoop[] = [];
+      for (const loop of matching) {
+        const since =
+          loop.opened_at ??
+          ledger.find((e) => e.event_type === "loop_proposed" && e.subject_ids[0] === loop.id)?.at ??
+          new Date(now).toISOString();
+        const open: OpenLoop = {
+          loop,
+          age_seconds: Math.max(0, Math.floor((now - Date.parse(since)) / 1000)),
+          governing_when_ids: await this.#whenIds(tx, loop),
+          // Ageing policies (SPEC B4) are not evaluated yet, so nothing is breaching.
+          breaching: false,
+        };
+        if (!filter.breaching_only || open.breaching) loops.push(open);
+      }
       return { loops };
     });
   }
@@ -529,15 +529,17 @@ export class Kernel {
    * traversal of the stored graph.
    */
   whatFiresNext(query: { loop_id: string } | { when_id: string }): Promise<{ effects: FiringEffect[] }> {
-    return this.#store.read((tx) => {
+    return this.#store.read(async (tx) => {
       if ("loop_id" in query) {
-        const loop = this.#loop(tx, query.loop_id);
+        const loop = await this.#loop(tx, query.loop_id);
         if (!ARMED.has(loop.state)) return { effects: [] };
-        return { effects: this.#whenIds(tx, loop).map((w) => this.#effect(tx, loop, w)) };
+        const effects: FiringEffect[] = [];
+        for (const w of await this.#whenIds(tx, loop)) effects.push(await this.#effect(tx, loop, w));
+        return { effects };
       }
-      const when = tx.getNode(query.when_id);
+      const when = await tx.getNode(query.when_id);
       if (!when || when.kind !== "when") throw new KernelError("not_found", `When ${query.when_id} does not exist`);
-      return { effects: this.#effectsOfWhen(tx, when.id) };
+      return { effects: await this.#effectsOfWhen(tx, when.id) };
     });
   }
 
@@ -547,11 +549,11 @@ export class Kernel {
    * at the snapshot: breach % and the median age of accepted, non-closed loops.
    */
   health(windowSeconds: number): Promise<HealthMetrics> {
-    return this.#store.read((tx) => {
+    return this.#store.read(async (tx) => {
       const now = this.#now().getTime();
       const since = now - windowSeconds * 1000;
       const inWindow = (at: string | null): boolean => at !== null && Date.parse(at) >= since && Date.parse(at) <= now;
-      const loops = tx.listLoops();
+      const loops = await tx.listLoops();
       const ages = loops
         .filter((l) => !CLOSED.has(l.state) && l.opened_at !== null)
         .map((l) => Math.max(0, Math.floor((now - Date.parse(l.opened_at as string)) / 1000)))
@@ -562,7 +564,7 @@ export class Kernel {
         snapshot_at: new Date(now).toISOString(),
         // Ageing policies (SPEC B4) are not evaluated yet, so nothing is breaching (as in open_loops).
         breach_pct: 0,
-        manual_correction_count: tx.ledger().filter((e) => e.event_type === "manual_correction" && inWindow(e.at)).length,
+        manual_correction_count: (await tx.ledger()).filter((e) => e.event_type === "manual_correction" && inWindow(e.at)).length,
         median_open_age_seconds: median,
         abandonment_count: loops.filter((l) => l.close_reason === "abandoned" && inWindow(l.closed_at)).length,
       };
@@ -576,8 +578,8 @@ export class Kernel {
    * equal to `after`. A position beyond the committed ledger is a bad request.
    */
   ledgerEvents(after: number, limit: number): Promise<LedgerEventsPage> {
-    return this.#store.read((tx) => {
-      const page = tx.ledgerAfter(after, limit);
+    return this.#store.read(async (tx) => {
+      const page = await tx.ledgerAfter(after, limit);
       if (!page) throw new KernelError("bad_request", `cursor ${after} is not a position in the committed ledger`);
       return { events: page.events, next: page.position };
     });
@@ -593,14 +595,14 @@ export class Kernel {
     return this.#now().toISOString();
   }
 
-  #loop(tx: GraphTx, loopId: string): Loop {
-    const loop = tx.getLoop(loopId);
+  async #loop(tx: GraphTx, loopId: string): Promise<Loop> {
+    const loop = await tx.getLoop(loopId);
     if (!loop) throw new KernelError("not_found", `loop ${loopId} does not exist`);
     return loop;
   }
 
-  #communication(tx: GraphTx, id: string): Communication {
-    const communication = tx.getCommunication(id);
+  async #communication(tx: GraphTx, id: string): Promise<Communication> {
+    const communication = await tx.getCommunication(id);
     if (!communication) throw new KernelError("not_found", `communication ${id} does not exist`);
     return communication;
   }
@@ -610,13 +612,19 @@ export class Kernel {
    * under, writes communication_sent and the outbox entry citing it in the
    * same transaction, and marks the send request enqueued.
    */
-  #release(tx: GraphTx, communication: Communication, request: SendRequest, actor: string, release: Record<string, unknown>): LedgerEvent {
+  async #release(
+    tx: GraphTx,
+    communication: Communication,
+    request: SendRequest,
+    actor: string,
+    release: Record<string, unknown>,
+  ): Promise<LedgerEvent> {
     const authority: Authority = request.authority;
     const sent: Communication = { ...communication, sent_under_authority: authority };
     this.#check("communication", sent);
-    tx.putCommunication(sent);
+    await tx.putCommunication(sent);
     const at = this.#at();
-    const ledger_event = this.#append(tx, {
+    const ledger_event = await this.#append(tx, {
       at,
       actor,
       event_type: "communication_sent",
@@ -624,13 +632,13 @@ export class Kernel {
       payload: { communication_id: communication.id, loop_id: request.loop_id, authority, requested_by: request.requested_by, ...release },
       idempotency_key: null,
     });
-    tx.enqueue({
+    await tx.enqueue({
       ledger_event_id: ledger_event.id,
       topic: "send",
       payload: { communication_id: communication.id, loop_id: request.loop_id },
       created_at: at,
     });
-    tx.putSendRequest({ ...request, status: "enqueued" });
+    await tx.putSendRequest({ ...request, status: "enqueued" });
     return ledger_event;
   }
 
@@ -647,17 +655,18 @@ export class Kernel {
     return [...new Set(communication.participant_who_ids)].filter((id) => !this.#ownerReceiverIds.has(id));
   }
 
-  #whenIds(tx: GraphTx, loop: Loop): string[] {
-    const ids = loop.member_node_ids.filter((id) => tx.getNode(id)?.kind === "when");
+  async #whenIds(tx: GraphTx, loop: Loop): Promise<string[]> {
+    const ids: string[] = [];
+    for (const id of loop.member_node_ids) if ((await tx.getNode(id))?.kind === "when") ids.push(id);
     if (loop.closing_when_id !== null && !ids.includes(loop.closing_when_id)) ids.push(loop.closing_when_id);
     return ids;
   }
 
-  #effectsOfWhen(tx: GraphTx, whenId: string): FiringEffect[] {
-    return tx
-      .listLoops()
-      .filter((l) => ARMED.has(l.state) && this.#whenIds(tx, l).includes(whenId))
-      .map((l) => this.#effect(tx, l, whenId));
+  async #effectsOfWhen(tx: GraphTx, whenId: string): Promise<FiringEffect[]> {
+    const effects: FiringEffect[] = [];
+    for (const l of await tx.listLoops())
+      if (ARMED.has(l.state) && (await this.#whenIds(tx, l)).includes(whenId)) effects.push(await this.#effect(tx, l, whenId));
+    return effects;
   }
 
   /**
@@ -665,9 +674,9 @@ export class Kernel {
    * its members wait on (is_waiting_on) or that causes/enables a member
    * re-opens a waiting or chased loop; any other member When is recorded only.
    */
-  #effect(tx: GraphTx, loop: Loop, whenId: string): FiringEffect {
+  async #effect(tx: GraphTx, loop: Loop, whenId: string): Promise<FiringEffect> {
     const members = new Set(loop.member_node_ids);
-    const via = tx.edgesTouching(whenId).filter((e) => unblocks(e, whenId, members)).map((e) => e.id);
+    const via = (await tx.edgesTouching(whenId)).filter((e) => unblocks(e, whenId, members)).map((e) => e.id);
     const effect: FiringEffect = { when_id: whenId, loop_id: loop.id };
     if (loop.closing_when_id === whenId) effect.next_state = "closed";
     else if (via.length > 0 && (loop.state === "waiting" || loop.state === "chased")) effect.next_state = "open";
@@ -675,12 +684,12 @@ export class Kernel {
     return effect;
   }
 
-  #move(
+  async #move(
     tx: GraphTx,
     loop: Loop,
     to: LoopState,
     how: { actor: string; evidence: { kind: "communication" | "gather" | "ledger_event"; id: string }; idempotency_key: string | null; close_reason: Loop["close_reason"] },
-  ): LoopWithEvent {
+  ): Promise<LoopWithEvent> {
     if (!LOOP_TRANSITIONS[loop.state].includes(to))
       throw new KernelError("conflict", `loop ${loop.id} cannot move from ${loop.state} to ${to}`);
     const at = this.#at();
@@ -691,8 +700,8 @@ export class Kernel {
       close_reason: to === "closed_with_reason" ? how.close_reason : null,
     };
     this.#check("loop", next);
-    tx.putLoop(next);
-    const ledger_event = this.#append(tx, {
+    await tx.putLoop(next);
+    const ledger_event = await this.#append(tx, {
       at,
       actor: how.actor,
       event_type: "transition",
@@ -703,10 +712,10 @@ export class Kernel {
     return { loop: next, ledger_event };
   }
 
-  #append(tx: GraphTx, event: Omit<LedgerEvent, "id"> & { event_type: LedgerEventType }): LedgerEvent {
+  async #append(tx: GraphTx, event: Omit<LedgerEvent, "id"> & { event_type: LedgerEventType }): Promise<LedgerEvent> {
     const full: LedgerEvent = { id: this.#newId("evt"), ...event };
     this.#check("ledger-event", full);
-    tx.appendEvent(full);
+    await tx.appendEvent(full);
     return full;
   }
 
