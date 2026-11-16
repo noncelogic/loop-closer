@@ -52,13 +52,19 @@ Use pattern, as `PgGraphStore` (`src/kernel/pg-store.ts`) applies it:
   pool destroys it. A rejected query fails the transaction even if the
   callback swallowed the rejection (Postgres would otherwise turn the
   `COMMIT` into a silent rollback).
-- Write transactions run READ COMMITTED and lock every row they read for a
-  later write with `FOR UPDATE`; a second transaction on the same loop waits
-  for the first to commit and then reads its result. Ledger appends also take
-  one transaction-scoped advisory lock, so `ledger_events.seq` order is commit
-  order and ledger positions handed to readers stay valid. A deadlock
+- Write transactions run SERIALIZABLE, so checks that find no row (a new
+  node id is unused, no open loop duplicates a proposal, an idempotency key
+  is unused) hold at commit as checks on existing rows do; `FOR UPDATE`
+  alone cannot lock a missing row. Rows read for a later write are also
+  taken `FOR UPDATE`, so a second transaction on the same loop waits for the
+  first rather than computing a result that cannot commit. A deadlock
   (`40P01`) or serialisation failure (`40001`) re-runs the transaction from
   the start, up to a bounded number of attempts.
+- Every writer of `ledger_events` (the graph store and both timer stores)
+  takes one transaction-scoped advisory lock before its first append
+  (`src/db/ledger-order.ts`), so at most one transaction holds uncommitted
+  ledger rows, `ledger_events.seq` order is commit order, and ledger
+  positions handed to readers stay valid.
 - Reads run REPEATABLE READ READ ONLY: one snapshot per `read()`.
 - Values are bound as parameters; `jsonb` values are passed as JSON text.
 
@@ -76,6 +82,9 @@ builders are out: they add a second schema model next to the migrations.
 - `loop_members` has no position column, so a loop's `member_node_ids` read
   back sorted by node id, not in proposal order. Keeping proposal order would
   need a schema change.
-- Every ledger append serialises on one advisory lock until its transaction
-  ends. At personal scale (hundreds to thousands of loops) that is the
+- Every ledger append, by any writer, serialises on one advisory lock until
+  its transaction ends. A timer tick holding a claimed When while it waits for
+  that lock can deadlock with a graph transaction that holds the lock and
+  wants the same When; Postgres aborts one of them, the graph store retries,
+  and a tick that loses is re-run by the next tick. At personal scale (hundreds to thousands of loops) that is the
   intended trade: exact, gap-free ledger positions over append throughput.

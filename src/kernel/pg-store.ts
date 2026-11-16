@@ -2,18 +2,22 @@
 // schema, through node-postgres (docs/decisions/postgres-client.md).
 //
 // Every transaction() runs on one pooled connection between BEGIN and COMMIT;
-// a throw, or any GraphTx call that rejects, rolls the whole of it back. Rows
-// a write transaction reads (nodes, edges, loops, communications, send
-// requests) are taken with FOR UPDATE, so a second store instance working on
-// the same loop waits for the first to commit and then sees what it wrote:
-// a transition from one state applies once, however many stores race it.
-// Ledger appends additionally take one transaction-scoped advisory lock, so
-// ledger_events.seq order is commit order and ledgerAfter positions are
-// stable. A deadlock or serialisation failure re-runs the transaction.
+// a throw, or any GraphTx call that rejects, rolls the whole of it back.
+// Write transactions run SERIALIZABLE: a decision taken on a row that is not
+// there (a new node id, no duplicate loop, an unused idempotency key) is
+// protected like one taken on a row that is, so two stores racing the same
+// proposal cannot both admit it. Rows a write transaction reads are also
+// taken with FOR UPDATE, so a second store instance working on the same loop
+// waits for the first instead of computing a doomed result. Ledger appends
+// take the ledger ordering lock (src/db/ledger-order.ts), shared with every
+// other ledger writer, so ledger_events.seq order is commit order and
+// ledgerAfter positions are stable. A deadlock or serialisation failure
+// re-runs the transaction from the start.
 //
 // read() runs REPEATABLE READ READ ONLY: one snapshot, no locks, and every
 // write call is rejected before it reaches the database.
 import type pg from "pg";
+import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
 import type { GraphStore, GraphTx } from "./store.ts";
 import type { Communication, Edge, LedgerEvent, Loop, Node, OutboxEntry, SendRequest } from "./types.ts";
 
@@ -21,11 +25,9 @@ import type { Communication, Edge, LedgerEvent, Loop, Node, OutboxEntry, SendReq
 const RETRYABLE = new Set(["40001", "40P01"]);
 const UNIQUE_VIOLATION = "23505";
 const LEDGER_IDEMPOTENCY_CONSTRAINT = "ledger_events_idempotency_key_key";
-/** Advisory lock key held by a transaction from its first ledger append until it ends. */
-const LEDGER_APPEND_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('loopcloser:ledger_events:append', 0))";
 
 export interface PgGraphStoreOptions {
-  /** Attempts per transaction when Postgres reports a deadlock or serialisation failure. Default 5. */
+  /** Attempts per transaction when Postgres reports a deadlock or serialisation failure. Default 10. */
   readonly maxAttempts?: number;
 }
 
@@ -36,7 +38,7 @@ export class PgGraphStore implements GraphStore {
   /** `pool` is owned by the caller, who ends it; its connections act as the app role. */
   constructor(pool: pg.Pool, opts: PgGraphStoreOptions = {}) {
     this.#pool = pool;
-    this.#maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
+    this.#maxAttempts = Math.max(1, opts.maxAttempts ?? 10);
   }
 
   transaction<T>(fn: (tx: GraphTx) => T | Promise<T>): Promise<T> {
@@ -62,7 +64,7 @@ export class PgGraphStore implements GraphStore {
     let broken = false;
     const view = pgTx(client, writable);
     try {
-      await client.query(writable ? "BEGIN ISOLATION LEVEL READ COMMITTED" : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query(writable ? "BEGIN ISOLATION LEVEL SERIALIZABLE" : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       try {
         const result = await fn(view.tx);
         view.close();
