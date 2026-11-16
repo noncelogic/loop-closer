@@ -100,3 +100,25 @@ test("the estate image workflow runs only on self-hosted runners and reads the r
   assert.ok(checkout, "the job checks out the merged commit");
   assert.equal((checkout["with"] as Obj)?.["persist-credentials"], false);
 });
+
+// Placement: every label a job asks for must be carried by an online estate
+// runner, or the job queues forever and blocks the `estate-image` concurrency
+// group. The estate's self-hosted runner is the passband-ci ARC scale set on
+// AKS, labelled [passband-ci, aks, self-hosted]; it carries no `linux` label
+// (run 43924808173 queued on [self-hosted, linux]).
+const ESTATE_RUNNER_LABELS = ["passband-ci", "aks", "self-hosted"];
+
+test("every estate image job asks only for labels the passband-ci runner carries", () => {
+  const { wf } = load();
+  for (const [name, job] of Object.entries(wf["jobs"] as Obj)) {
+    const runsOn = (job as Obj)["runs-on"];
+    const labels: unknown[] = Array.isArray(runsOn) ? runsOn : [runsOn];
+    for (const l of labels) {
+      assert.ok(
+        ESTATE_RUNNER_LABELS.includes(String(l)),
+        `job ${name}: runner label ${JSON.stringify(l)} is not carried by passband-ci ${JSON.stringify(ESTATE_RUNNER_LABELS)}`,
+      );
+    }
+    assert.ok(labels.includes("passband-ci"), `job ${name} targets the passband-ci scale set by name`);
+  }
+});
