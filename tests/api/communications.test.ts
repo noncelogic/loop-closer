@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { createApiValidator, createValidator, SCHEMA_ID_BASE } from "../../src/contracts/index.ts";
+import { B3_OPERATIONS, createApiValidator, createValidator, SCHEMA_ID_BASE } from "../../src/contracts/index.ts";
 import type { Authority, InMemoryGraphStore } from "../../src/kernel/index.ts";
 import { createServer } from "../../src/server.ts";
 import { experiment, experimentProposal, joe, newKernel, repoRuns, resultsLand } from "../kernel/fixtures.ts";
@@ -21,6 +21,13 @@ const KEYS = new Map([
   ["joe", "test-key-joe"],
 ]);
 const KEY = KEYS.get("agent:juno")!;
+// Scopes are data (TECH-STACK §9): juno runs the loops but sends nothing; only the sender may request a send.
+const SCOPES = new Map<string, readonly string[]>([
+  ["agent:juno", B3_OPERATIONS.filter((op) => op !== "request_send" && op !== "approve_send")],
+  ["agent:sender", ["request_send"]],
+  ["agent:chaser", ["transition", "open_loops", "what_fires_next"]],
+  ["agent:drafter", ["record_communication", "open_loops"]],
+]);
 const api = createApiValidator();
 const ajv = createValidator();
 
@@ -31,7 +38,7 @@ let store: InMemoryGraphStore;
 before(async () => {
   const env = newKernel();
   store = env.store;
-  server = createServer({ kernel: env.kernel, apiKeys: KEYS });
+  server = createServer({ kernel: env.kernel, apiKeys: KEYS, scopes: SCOPES });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
