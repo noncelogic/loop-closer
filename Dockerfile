@@ -15,6 +15,8 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean -
 COPY --from=build /app/dist ./dist
 # Read at runtime by src/contracts (schemas resolved relative to the app root).
 COPY contracts ./contracts
+# Applied by the migrate entrypoint: `node dist/migrate.js` with DATABASE_URL set.
+COPY db/migrations ./db/migrations
 USER node
 EXPOSE 8080
 CMD ["node", "dist/main.js"]
