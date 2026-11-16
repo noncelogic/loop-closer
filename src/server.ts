@@ -229,7 +229,7 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
       operationId: "open_loops",
       method: "GET",
       pattern: /^\/loops$/,
-      query: ["accountable_who_id", "loop_type", "state", "breaching_only"],
+      query: ["accountable_who_id", "loop_type", "state", "breaching_only", "key_result_system", "key_result_id"],
       handle: async ({ query }) => {
         const filter: OpenLoopsFilter = {};
         const who = query.get("accountable_who_id");
@@ -244,6 +244,15 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
             throw new HttpError(400, "bad_request", "breaching_only must be true or false");
           filter.breaching_only = breaching === "true";
         }
+        const krSystem = query.get("key_result_system");
+        const krId = query.get("key_result_id");
+        if ((krSystem === undefined) !== (krId === undefined))
+          throw new HttpError(400, "bad_request", "give both key_result_system and key_result_id, or neither");
+        if (krSystem !== undefined && krId !== undefined)
+          filter.key_result_ref = {
+            system: param("open_loops", "key_result_system", krSystem),
+            id: param("open_loops", "key_result_id", krId),
+          };
         return { status: 200, body: await kernel.openLoops(filter) };
       },
     },

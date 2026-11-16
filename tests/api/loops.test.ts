@@ -277,3 +277,80 @@ test("a response body that does not match the contract is withheld", async () =>
     await new Promise<void>((resolve) => drifting.close(() => resolve()));
   }
 });
+
+// LC-M4-T1: a loop may carry an opaque external reference to the key result it serves.
+const okr = { system: "plane", id: "KR-42" } as const;
+
+test("a loop proposed with a key-result reference returns it from open_loops", async () => {
+  const proposed = await call("propose_loop", "POST", "/loops/propose", experimentProposal({
+    name: "Serves KR-42",
+    nodes: [{ ref: joe.id }, { ...experiment, id: "lc_what_kr_carry" }],
+    edges: [],
+    closing_when_id: undefined,
+    key_result_ref: okr,
+  }));
+  assert.equal(proposed.status, 201);
+  const loop = (proposed.body as Obj)["loop"];
+  assert.deepEqual(loop["key_result_ref"], okr);
+
+  const listed = await call("open_loops", "GET", `/loops?accountable_who_id=${joe.id}`);
+  const found = ((listed.body as Obj)["loops"] as Obj[]).find((l) => l["loop"]["id"] === loop["id"]);
+  assert.ok(found, "the proposed loop is listed");
+  assert.deepEqual(found["loop"]["key_result_ref"], okr);
+
+  // A loop proposed without a reference behaves as before: no key_result_ref field.
+  const plain = await call("propose_loop", "POST", "/loops/propose", experimentProposal({
+    name: "Serves nothing in particular",
+    nodes: [{ ref: joe.id }, { ...experiment, id: "lc_what_kr_none" }],
+    edges: [],
+    closing_when_id: undefined,
+  }));
+  assert.equal(plain.status, 201);
+  assert.equal("key_result_ref" in (plain.body as Obj)["loop"], false);
+
+  // A malformed reference is refused by the contract.
+  const bad = await fetch(`${base}/v1/loops/propose`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+    body: JSON.stringify(experimentProposal({
+      nodes: [{ ref: joe.id }, { ...experiment, id: "lc_what_kr_bad" }],
+      edges: [],
+      closing_when_id: undefined,
+      key_result_ref: { system: "plane" } as never,
+    })),
+  });
+  assert.equal(bad.status, 400);
+});
+
+test("open_loops filters by key-result reference", async () => {
+  const propose = async (whatId: string, ref?: { system: string; id: string }): Promise<string> => {
+    const res = await call("propose_loop", "POST", "/loops/propose", experimentProposal({
+      name: `Filter ${whatId}`,
+      nodes: [{ ref: joe.id }, { ...experiment, id: whatId }],
+      edges: [],
+      closing_when_id: undefined,
+      ...(ref ? { key_result_ref: ref } : {}),
+    }));
+    assert.equal(res.status, 201);
+    return (res.body as Obj)["loop"]["id"] as string;
+  };
+  const a = await propose("lc_what_kr_a", { system: "plane", id: "KR-7" });
+  const b = await propose("lc_what_kr_b", { system: "plane", id: "KR-8" });
+  const c = await propose("lc_what_kr_c", { system: "linear", id: "KR-7" });
+  const none = await propose("lc_what_kr_d");
+
+  const ids = async (query: string): Promise<string[]> => {
+    const res = await call("open_loops", "GET", `/loops?${query}`);
+    assert.equal(res.status, 200);
+    return ((res.body as Obj)["loops"] as Obj[]).map((l) => l["loop"]["id"] as string);
+  };
+  assert.deepEqual(await ids("key_result_system=plane&key_result_id=KR-7"), [a]);
+  assert.deepEqual(await ids("key_result_system=linear&key_result_id=KR-7"), [c]);
+  assert.deepEqual(await ids("key_result_system=plane&key_result_id=KR-404"), []);
+  // One half of a reference alone is not a reference.
+  assert.equal((await call("open_loops", "GET", "/loops?key_result_id=KR-7")).status, 400);
+  assert.equal((await call("open_loops", "GET", "/loops?key_result_system=plane")).status, 400);
+  // Without the filter every loop is listed, with or without a reference.
+  const all = await ids(`accountable_who_id=${joe.id}`);
+  for (const id of [a, b, c, none]) assert.ok(all.includes(id));
+});
