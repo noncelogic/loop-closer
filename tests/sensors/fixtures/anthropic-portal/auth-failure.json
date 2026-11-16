@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-11-16T09:05:00Z",
+  "request": { "method": "GET", "path": "/listings" },
+  "response": {
+    "status": 401,
+    "headers": { "content-type": "application/json" },
+    "body": {
+      "error": {
+        "type": "authentication_error",
+        "message": "Invalid session credential: $CREDENTIAL"
+      }
+    }
+  }
+}
