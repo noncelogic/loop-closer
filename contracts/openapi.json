@@ -22,6 +22,9 @@
     },
     {
       "name": "export"
+    },
+    {
+      "name": "ledger"
     }
   ],
   "paths": {
@@ -774,6 +777,60 @@
             }
           }
         ]
+      }
+    },
+    "/ledger/events": {
+      "get": {
+        "operationId": "ledger_events",
+        "summary": "Ledger events committed after a cursor, in commit order",
+        "description": "Read-only. Returns up to `limit` ledger events (SPEC B2.4) committed after `after`, in commit order, and the cursor to pass next. Paging from any cursor this operation returned yields every event committed after it exactly once: no gaps, no repeats. When nothing new is committed the page is empty and next_cursor equals the cursor given. Without `after`, reading starts at the beginning of the ledger.",
+        "tags": [
+          "ledger"
+        ],
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/LedgerCursor"
+            },
+            "description": "A next_cursor from an earlier page; omitted = the start of the ledger."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            },
+            "description": "Most events in the page."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LedgerEventsPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
       }
     }
   },
@@ -1592,6 +1649,30 @@
             "items": {
               "$ref": "#/components/schemas/Tombstone"
             }
+          }
+        }
+      },
+      "LedgerCursor": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,14})$",
+        "description": "Opaque ledger cursor: hand back a next_cursor this operation returned. Do not construct or compare cursors."
+      },
+      "LedgerEventsPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "events",
+          "next_cursor"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LedgerEvent"
+            }
+          },
+          "next_cursor": {
+            "$ref": "#/components/schemas/LedgerCursor"
           }
         }
       }

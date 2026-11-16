@@ -1,5 +1,5 @@
-// HTTP surface of the loopcloser service: GET /healthz, plus the loop and
-// communication operations of the frozen API contract (contracts/openapi.json,
+// HTTP surface of the loopcloser service: GET /healthz, plus the loop,
+// communication and ledger-reading operations of the frozen API contract (contracts/openapi.json,
 // served under /v1) answered through the kernel. Every request body and query is checked
 // against the contract before the kernel sees it, and every response body is
 // checked against the contract before it is sent: a response that would not
@@ -275,6 +275,24 @@ function routes(kernel: Kernel, api: ApiValidator): Route[] {
         if (seconds === undefined)
           throw new HttpError(400, "bad_request", `window ${JSON.stringify(window)} is not an ISO 8601 duration in weeks, days, hours, minutes or seconds`);
         return { status: 200, body: { window, ...(await kernel.health(seconds)) } };
+      },
+    },
+    {
+      // Read-only. The cursor is the commit position, opaque to callers; the
+      // contract's LedgerCursor pattern keeps it a safe integer.
+      operationId: "ledger_events",
+      method: "GET",
+      pattern: /^\/ledger\/events$/,
+      query: ["after", "limit"],
+      handle: async ({ query }) => {
+        const after = Number(param("ledger_events", "after", query.get("after") ?? "0"));
+        const rawLimit = query.get("limit") ?? "100";
+        const limit = /^[0-9]{1,4}$/.test(rawLimit) ? Number(rawLimit) : NaN;
+        const validLimit = api.parameter("ledger_events", "limit");
+        if (!Number.isInteger(limit) || (validLimit && !validLimit(limit)))
+          throw new HttpError(400, "bad_request", `limit ${JSON.stringify(rawLimit)} must be an integer from 1 to 500`);
+        const page = await kernel.ledgerEvents(after, limit);
+        return { status: 200, body: { events: page.events, next_cursor: String(page.next) } };
       },
     },
   ];
