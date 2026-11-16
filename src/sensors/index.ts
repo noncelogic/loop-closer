@@ -27,3 +27,14 @@ export {
   type SourceError,
   type SourceOptions,
 } from "./sources.ts";
+export {
+  ANTHROPIC_PORTAL_ENV,
+  AnthropicPortalReader,
+  PortalReadError,
+  loadAnthropicPortalConfig,
+  parseListings,
+  type AnthropicPortalConfig,
+  type AnthropicPortalReaderOptions,
+  type FetchLike,
+  type PortalReadErrorKind,
+} from "./anthropic-portal.ts";
