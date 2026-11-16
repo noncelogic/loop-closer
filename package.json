@@ -13,16 +13,19 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run typecheck",
     "start": "node dist/main.js",
+    "migrate": "node dist/migrate.js",
     "test": "node --test \"tests/**/*.test.ts\" \"deploy/tests/**/*.test.ts\"",
     "replica:up": "docker compose up --detach --wait",
     "replica:down": "docker compose down"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "typescript": "~5.9.0",
     "yaml": "^2.9.1"
   },
   "dependencies": {
-    "ajv": "^8.20.0"
+    "ajv": "^8.20.0",
+    "pg": "^8.23.1"
   }
 }
