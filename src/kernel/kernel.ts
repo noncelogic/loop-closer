@@ -63,6 +63,27 @@ export class KernelError extends Error {
  */
 const SUBJECT_BOUND_SOURCES: ReadonlySet<string> = new Set(["anthropic_listings"]);
 
+/** An event When's change condition: the one payload field it watches and its value at the last firing. */
+function changeCondition(when: Node): { field: string; last_value?: unknown } | undefined {
+  const condition = when.attributes["change_condition"] as { field?: unknown; last_value?: unknown } | undefined;
+  if (condition === undefined || typeof condition.field !== "string") return undefined;
+  return condition as { field: string; last_value?: unknown };
+}
+
+/**
+ * Whether an event's payload satisfies a When's change condition: always for a
+ * When without one; otherwise the payload must report the field, and its value
+ * must differ (by value) from the value at the When's last firing. A When that
+ * has never fired under its condition (no last_value) fires on its first observation.
+ */
+function changeConditionMet(when: Node, payload: Record<string, unknown>): boolean {
+  const condition = changeCondition(when);
+  if (!condition) return true;
+  if (!Object.hasOwn(payload, condition.field)) return false;
+  if (!Object.hasOwn(condition, "last_value")) return true;
+  return !isDeepStrictEqual(payload[condition.field], condition.last_value);
+}
+
 /** Refuses an event When bound to a subject-bound source that names no subject. */
 function requireBoundSubject(node: Node): void {
   if (node.kind !== "when" || node.attributes["when_type"] !== "event") return;
@@ -346,8 +367,11 @@ export class Kernel {
    * fire_event: records the firing of a When (by id, or every event-When bound
    * to event_type + source; with a subject, only those whose binding names exactly
    * that subject -- a When naming no subject does not hear subject changes) as one when_fired ledger event, then applies the
-   * transitions the firing causes on armed loops (see whatFiresNext). A
-   * replayed idempotency key applies once. Workflow runs arrive with templates.
+   * transitions the firing causes on armed loops (see whatFiresNext). By
+   * event_type + source, a When with a change_condition fires only when the
+   * payload's value of its field differs from the value at its last firing (the
+   * first observation always fires); the ledger event lists it under
+   * unchanged_when_ids instead of when_ids. A replayed idempotency key applies once. Workflow runs arrive with templates.
    */
   fireEvent(input: FireEventInput): Promise<FireEventResult> {
     return this.#store.transaction(async (tx) => {
@@ -378,12 +402,28 @@ export class Kernel {
         }
       }
 
+      // A change-condition When fires (by event_type + source) only on a new value of its field.
+      const matched = whens;
+      const unchanged: Node[] = [];
+      if ("event_type" in input) {
+        whens = matched.filter((w) => {
+          const changed = changeConditionMet(w, input.payload);
+          if (!changed) unchanged.push(w);
+          return changed;
+        });
+      }
+
       const at = this.#at();
       const actor = input.actor ?? "system:fire_event";
       for (const when of whens) {
         if (when.attributes["when_type"] !== "event") continue; // calendar scheduling belongs to the timer loop
         const fireCount = typeof when.attributes["fire_count"] === "number" ? when.attributes["fire_count"] : 0;
-        const fired: Node = { ...when, attributes: { ...when.attributes, fired_at: at, fire_count: fireCount + 1 } };
+        const attributes: Record<string, unknown> = { ...when.attributes, fired_at: at, fire_count: fireCount + 1 };
+        const condition = changeCondition(when);
+        if (condition && "event_type" in input) {
+          attributes["change_condition"] = { ...condition, last_value: input.payload[condition.field] };
+        }
+        const fired: Node = { ...when, attributes };
         this.#check("node", fired);
         await tx.putNode(fired);
       }
@@ -392,13 +432,14 @@ export class Kernel {
       for (const w of whens) effects.push(...(await this.#effectsOfWhen(tx, w.id)));
       const loopIds = [...new Set(effects.map((e) => e.loop_id))];
       const payload: Record<string, unknown> = { when_ids: whens.map((w) => w.id), loop_ids: loopIds };
+      if (unchanged.length > 0) payload["unchanged_when_ids"] = unchanged.map((w) => w.id);
       if ("event_type" in input) Object.assign(payload, { event_type: input.event_type, source: input.source });
       if (input.payload !== undefined) payload["event_payload"] = input.payload;
       const ledger_event = await this.#append(tx, {
         at,
         actor,
         event_type: "when_fired",
-        subject_ids: [...whens.map((w) => w.id), ...loopIds],
+        subject_ids: [...matched.map((w) => w.id), ...loopIds],
         payload,
         idempotency_key: input.idempotency_key,
       });
