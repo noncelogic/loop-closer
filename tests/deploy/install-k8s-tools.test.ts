@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { createServer, type Server } from "node:http";
+import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ const SCRIPT = join(repoRoot, ".github", "scripts", "install-k8s-tools.sh");
 const BODY = "pinned-tool-bytes\n";
 async function flakyServer(failures: number): Promise<{ server: Server; url: string; hits: () => number }> {
   let n = 0;
-  const server = createServer((_req, res) => {
+  const server = createHttpServer((_req, res) => {
     n += 1;
     if (n <= failures) {
       res.writeHead(502).end("bad gateway");
