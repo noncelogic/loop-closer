@@ -10,7 +10,8 @@
 //   compares every subject's status with the last one this sensor recorded in
 //   the ledger, and emits a fire_event per change. A When names the subject it
 //   watches in source_binding.config.subject, so a change fires only that
-//   subject's When (a When naming no subject hears no listing change).
+//   subject's When. The kernel refuses a listings When that names no subject,
+//   so every listings When names the one listing whose change fires it.
 //
 // Every successful poll heartbeats, whether or not the world changed. A poll
 // that cannot see the world (a failed portal read) does not, so the framework
