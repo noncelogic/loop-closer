@@ -14,6 +14,17 @@ export const CONFIG_ENV = {
 
 export const DEFAULT_PORT = 8080;
 
+/**
+ * Selects test mode when set to "1": the API serves from an in-memory store
+ * that loses every loop on exit. Only tests and local smoke boots set it; the
+ * Deployment never does, so a deployed API without DATABASE_URL refuses to start.
+ */
+export const TEST_MODE_ENV = "LOOPCLOSER_TEST_MODE";
+
+/** Overrides API_KEYS_DIR / API_SCOPES_DIR, for boots outside the cluster (tests). */
+export const API_KEYS_DIR_ENV = "LOOPCLOSER_API_KEYS_DIR";
+export const API_SCOPES_DIR_ENV = "LOOPCLOSER_API_SCOPES_DIR";
+
 export interface Config {
   readonly host: string;
   readonly port: number;

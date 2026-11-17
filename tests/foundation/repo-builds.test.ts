@@ -47,7 +47,8 @@ test("clean checkout builds the service skeleton", { timeout: 300_000 }, async (
     // Boot the built service on an ephemeral port and hit its health endpoint.
     const child = spawn(process.execPath, [entry], {
       cwd: work,
-      env: { ...process.env, PORT: "0", HOST: "127.0.0.1" },
+      // No database here: the smoke boot selects test mode explicitly (src/main.ts).
+      env: { ...process.env, PORT: "0", HOST: "127.0.0.1", DATABASE_URL: "", LOOPCLOSER_TEST_MODE: "1" },
       stdio: ["ignore", "pipe", "inherit"],
     });
     try {
