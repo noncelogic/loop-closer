@@ -55,6 +55,27 @@ export class KernelError extends Error {
   }
 }
 
+/**
+ * Sources whose every change is about one subject (e.g. one directory listing).
+ * An event When bound to one of them must name that subject in
+ * source_binding.config.subject; otherwise it would hear every subject's change,
+ * or none, and each listing is its own loop (SPEC B2.3).
+ */
+const SUBJECT_BOUND_SOURCES: ReadonlySet<string> = new Set(["anthropic_listings"]);
+
+/** Refuses an event When bound to a subject-bound source that names no subject. */
+function requireBoundSubject(node: Node): void {
+  if (node.kind !== "when" || node.attributes["when_type"] !== "event") return;
+  const binding = node.attributes["source_binding"] as { source?: unknown; config?: Record<string, unknown> } | undefined;
+  if (typeof binding?.source !== "string" || !SUBJECT_BOUND_SOURCES.has(binding.source)) return;
+  const subject = binding.config?.["subject"];
+  if (typeof subject !== "string" || subject.trim() === "")
+    throw new KernelError(
+      "bad_request",
+      `When ${node.id} is bound to ${binding.source} but its source_binding.config.subject names no subject`,
+    );
+}
+
 export interface KernelOptions {
   now?: () => Date;
   /** Returns a fresh `lc_…` id; `prefix` names the record kind (loop, edge, evt). */
@@ -147,6 +168,7 @@ export class Kernel {
           continue;
         }
         this.#check("node", entry, "bad_request");
+        requireBoundSubject(entry);
         const existing = await tx.getNode(entry.id);
         if (existing && !isDeepStrictEqual(existing, entry))
           throw new KernelError("conflict", `node ${entry.id} already exists with different content; reference it with { ref }`);

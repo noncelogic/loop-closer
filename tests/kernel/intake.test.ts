@@ -2,7 +2,7 @@
 // accept_loop admits a proposed loop (SPEC B2.3 intake, B3).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { KernelError } from "../../src/kernel/index.ts";
+import { KernelError, type Node } from "../../src/kernel/index.ts";
 import { assertValid, experiment, experimentProposal, joe, newKernel, repoRuns, resultsLand } from "./fixtures.ts";
 
 test("propose then accept admits a loop after the dedup check", async () => {
@@ -112,4 +112,58 @@ test("propose_loop rejects subgraphs that do not hold together", async () => {
     { code: "bad_request" },
     "edges stay inside the proposed subgraph",
   );
+});
+
+// LC-SENSE-LISTING-BIND-SUBJECT: each directory listing is its own loop, so an
+// anthropic_listings event When must name the one listing whose change fires it.
+function listingWhen(config?: Record<string, unknown>): Node {
+  return {
+    ...repoRuns,
+    id: "lc_when_listing_status",
+    attributes: {
+      ...repoRuns.attributes,
+      event_type: "listing_status_changed",
+      source_binding: { source: "anthropic_listings", mechanism: "poll", ...(config === undefined ? {} : { config }) },
+    },
+  };
+}
+
+function listingProposal(when: Node) {
+  return experimentProposal({
+    loop_type: "directory-listing",
+    nodes: [joe, experiment, when],
+    edges: [{ from_id: experiment.id, to_id: when.id, edge_type: "is_waiting_on" }],
+    closing_when_id: undefined,
+  });
+}
+
+test("refuses an anthropic_listings event When whose binding names no subject", async () => {
+  for (const [label, config] of [
+    ["no config", undefined],
+    ["config without subject", {}],
+    ["empty subject", { subject: "" }],
+    ["blank subject", { subject: "   " }],
+    ["non-string subject", { subject: 7 }],
+  ] as const) {
+    const { kernel, store } = newKernel();
+    const when = listingWhen(config as Record<string, unknown> | undefined);
+    await assert.rejects(kernel.proposeLoop(listingProposal(when)), (err: unknown) => {
+      assert.ok(err instanceof KernelError, label);
+      assert.equal(err.code, "bad_request", label);
+      assert.match(err.message, /subject/, label);
+      return true;
+    });
+    const written = await store.read(async (tx) => ({ nodes: await tx.listNodes(), ledger: await tx.ledger(), loops: await tx.listLoops() }));
+    assert.deepEqual(written, { nodes: [], ledger: [], loops: [] }, label);
+  }
+});
+
+test("accepts an anthropic_listings event When whose binding names its listing", async () => {
+  const { kernel, store } = newKernel();
+  const when = listingWhen({ subject: "rove-connector" });
+  const { loop, ledger_event } = await kernel.proposeLoop(listingProposal(when));
+  assert.equal(loop.state, "proposed");
+  assert.ok(ledger_event.subject_ids.includes(when.id));
+  const stored = await store.read((tx) => tx.getNode(when.id));
+  assert.deepEqual(stored, when);
 });
