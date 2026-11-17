@@ -16,6 +16,7 @@ import {
   type TimerStore,
   type TimerTx,
 } from "./store.ts";
+import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
 
 const UNIQUE_VIOLATION = "23505";
 const LEDGER_IDEMPOTENCY_CONSTRAINT = "ledger_events_idempotency_key_key";
@@ -89,6 +90,8 @@ function pgTx(client: pg.PoolClient): TimerTx {
     },
 
     async appendLedgerEvent(event: LedgerEvent) {
+      // Ledger ordering protocol (src/db/ledger-order.ts): held until this transaction ends.
+      await client.query(LEDGER_APPEND_LOCK);
       try {
         await client.query(
           `INSERT INTO ledger_events (id, at, actor, event_type, subject_ids, payload, idempotency_key)
