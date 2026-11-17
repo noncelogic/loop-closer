@@ -9,11 +9,9 @@
 // until it commits or rolls back. Each seq is then handed out only after every
 // lower seq has committed or rolled back, so a page never skips or repeats a
 // committed event.
+// The lock itself is the ledger ordering protocol in src/db/ledger-order.ts.
 import type pg from "pg";
-
-/** The advisory lock every ledger append holds until its transaction ends (shared with LC-RUN-PGSTORE). */
-export const LEDGER_APPEND_LOCK_KEY = "loopcloser:ledger_events:append";
-const LEDGER_APPEND_LOCK = `SELECT pg_advisory_xact_lock(hashtextextended('${LEDGER_APPEND_LOCK_KEY}', 0))`;
+import { LEDGER_APPEND_LOCK } from "./ledger-order.ts";
 
 const UNIQUE_VIOLATION = "23505";
 const LEDGER_IDEMPOTENCY_CONSTRAINT = "ledger_events_idempotency_key_key";

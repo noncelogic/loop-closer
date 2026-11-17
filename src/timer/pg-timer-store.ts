@@ -20,7 +20,6 @@ import {
   type TimerStore,
   type TimerTx,
 } from "./store.ts";
-import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
 
 /** Ledger events that move a loop into a new state; the latest one's `at` is when it entered its current state. */
 const STATE_EVENTS = ["loop_proposed", "loop_accepted", "loop_rejected", "transition"] as const;
@@ -96,12 +95,7 @@ function pgTx(client: pg.PoolClient, ageingPolicies: readonly AgeingPolicy[]): T
     },
 
     async appendLedgerEvent(event: LedgerEvent) {
-<<<<<<< HEAD
       await client.query("SAVEPOINT lc_append");
-=======
-      // Ledger ordering protocol (src/db/ledger-order.ts): held until this transaction ends.
-      await client.query(LEDGER_APPEND_LOCK);
->>>>>>> origin/main
       try {
         await appendLedgerEvent(
           client,

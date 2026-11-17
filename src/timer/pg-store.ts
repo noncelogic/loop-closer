@@ -18,7 +18,6 @@ import {
   type TimerStore,
   type TimerTx,
 } from "./store.ts";
-import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
 
 export interface PgTimerStoreOptions {
   readonly connectionString: string;
@@ -89,29 +88,11 @@ function pgTx(client: pg.PoolClient): TimerTx {
     },
 
     async appendLedgerEvent(event: LedgerEvent) {
-<<<<<<< HEAD
       await appendLedgerEvent(
         client,
         event,
         (e) => new DuplicateIdempotencyKeyError(`idempotency key ${e.idempotency_key} already recorded`),
       );
-=======
-      // Ledger ordering protocol (src/db/ledger-order.ts): held until this transaction ends.
-      await client.query(LEDGER_APPEND_LOCK);
-      try {
-        await client.query(
-          `INSERT INTO ledger_events (id, at, actor, event_type, subject_ids, payload, idempotency_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [event.id, event.at, event.actor, event.event_type, event.subject_ids, event.payload, event.idempotency_key],
-        );
-      } catch (err) {
-        const e = err as { code?: string; constraint?: string };
-        if (e.code === UNIQUE_VIOLATION && e.constraint === LEDGER_IDEMPOTENCY_CONSTRAINT) {
-          throw new DuplicateIdempotencyKeyError(`idempotency key ${event.idempotency_key} already recorded`);
-        }
-        throw err;
-      }
->>>>>>> origin/main
     },
 
     async setNextFireAt(whenId, nextFireAt, schedule) {
