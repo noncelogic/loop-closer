@@ -62,3 +62,27 @@ test("the aks-obs-01 overlay renders the tick CronJob unsuspended on the pinned 
     "the tick CronJob is schema-validated",
   );
 });
+
+// LC-D1b-PULL-CRED-DEPLOY acceptance: the overlay's registry-pull
+// ExternalSecret, as rendered for aks-obs-01, reads exactly
+// kv/loopcloser/registry-pull with the `registry`, `username` and `password`
+// properties: the path and properties the DevOps route populates in OpenBao
+// through delegated.openbao (docs/ops/registry-pull.md), so the pull Secret
+// the loopcloser Pods list in imagePullSecrets resolves on the estate.
+test("the registry-pull ExternalSecret reads exactly kv/loopcloser/registry-pull with the registry, username and password properties", () => {
+  const objs = parseObjects(kustomizeBuild(OVERLAY));
+  const es = one(objs, "ExternalSecret", "loopcloser-registry-pull");
+
+  assert.equal(es["metadata"]["namespace"], "loop-closer");
+  assert.deepEqual(es["spec"]["secretStoreRef"], { kind: "ClusterSecretStore", name: "openbao" });
+  assert.equal(es["spec"]["target"]["name"], "loopcloser-registry-pull");
+  assert.equal(es["spec"]["target"]["template"]["type"], "kubernetes.io/dockerconfigjson");
+  assert.equal(es["spec"]["dataFrom"], undefined, "no dataFrom: only the named properties are read");
+
+  const data = es["spec"]["data"] as Obj[];
+  assert.deepEqual(
+    data.map((d) => ({ secretKey: d["secretKey"], ...d["remoteRef"] })).sort((a, b) => a.property.localeCompare(b.property)),
+    ["password", "registry", "username"].map((p) => ({ secretKey: p, key: "kv/loopcloser/registry-pull", property: p })),
+    "exactly kv/loopcloser/registry-pull, properties registry, username and password",
+  );
+});
