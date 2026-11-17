@@ -1,0 +1,98 @@
+# The listings-read sensor (LC-EST-PORTAL-CRON): the scheduled public read of
+# the tracked directory listings (SPEC.md, directory-listing loops), because
+# no listings API exists. It runs the portal-read entrypoint
+# (`node dist/portal-read.js`, the image build's output of src/portal-read.ts)
+# with the listing page URLs from the ConfigMap below.
+#
+# Shipped SUSPENDED, with fixture URLs on reserved domains: no listing URL is
+# recorded yet, and the overlay's pinned image predates src/portal-read.ts.
+# Activation replaces the URLs, rolls newTag to an image that carries the
+# entrypoint and sets `suspend: false`.
+#
+# The public read needs no credential (CLOSER-122): nothing is mounted, no
+# ServiceAccount token is automounted, and the only Secret referenced is the
+# graph's DATABASE_URL (the CNPG app URI), as for the tick. The image is set by
+# the overlay's `images` pin.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loopcloser-listings-pages
+  labels:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: listings-read
+data:
+  # LISTINGS_DIRECTORY_PAGES: JSON object, listing → public directory page URL.
+  directory-pages.json: |
+    {
+      "rove-connector": "https://listings.example.invalid/rove-connector",
+      "rove-plugin": "https://listings.example.invalid/rove-plugin"
+    }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: loopcloser-listings-read
+  labels:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: listings-read
+  annotations:
+    # After the schema Job (wave 2): a run reads and writes the migrated graph.
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  # Every six hours: the anthropic_listings sensor's heartbeat interval
+  # (src/sensors/sources.ts, ANTHROPIC_LISTINGS_SENSOR).
+  schedule: "0 */6 * * *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: loopcloser
+            app.kubernetes.io/component: listings-read
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          # loop-closer's own pull-only credential (registry-credential-per-product v2),
+          # synced from OpenBao by deploy/base/external-secrets.yaml.
+          imagePullSecrets:
+            - name: loopcloser-registry-pull
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: portal-read
+              image: ghcr.io/noncelogic/loop-closer
+              command: ["node", "dist/portal-read.js"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: loopcloser-db-app
+                      key: uri
+                - name: LISTINGS_DIRECTORY_PAGES
+                  valueFrom:
+                    configMapKeyRef:
+                      name: loopcloser-listings-pages
+                      key: directory-pages.json
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]

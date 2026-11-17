@@ -10,10 +10,13 @@
 // registry or Argo CD, and no secret is read.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { kustomizeBuild, parseObjects, repoRoot, SCHEMA_DIR, validate, type Obj } from "./manifest-check.ts";
+import { buildEntrypoints, manifestScriptIn } from "../support/entrypoint-build.ts";
+import { loadPublicListingConfig, PUBLIC_LISTING_ENV } from "../../src/sensors/public-listing.ts";
 
 const OVERLAY = join(repoRoot, "deploy", "overlays", "aks-obs-01");
 const NAMESPACE = "loop-closer";
@@ -22,6 +25,8 @@ const DB_SECRET = `${DB_CLUSTER}-app`;
 const API = "loopcloser";
 const SCHEMA_JOB = "loopcloser-schema";
 const PULL_SECRET = "loopcloser-registry-pull";
+const LISTINGS_READ = "loopcloser-listings-read";
+const LISTINGS_PAGES = "loopcloser-listings-pages";
 // .github/workflows/estate-image.yml pushes `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>`.
 const ESTATE_IMAGE = /^(?<repo>[a-z0-9.-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)*\/loopcloser):sha-(?<sha>[0-9a-f]{40})$/;
 
@@ -173,4 +178,106 @@ test("the rendered aks-obs-01 overlay passes the offline schema check including 
   assert.throws(() => validate(badJob), /backoffLimit/);
 
   assert.ok(validated.includes("batch/v1 CronJob loopcloser-tick"), "the tick CronJob is schema-validated");
+});
+
+// LC-EST-PORTAL-CRON acceptance: the overlay carries the listings-read CronJob,
+// suspended, running the portal-read entrypoint (src/portal-read.ts) with the
+// listing page URLs from a ConfigMap. The public listing read needs no
+// credential (CLOSER-122), so the only Secret it references is the graph's
+// DATABASE_URL, and it mounts nothing. The URLs are fixtures on reserved
+// domains: no listing URL is recorded yet (SPEC.md names the listings only).
+test("the listings-read CronJob runs the portal-read entrypoint with listing URLs from its ConfigMap and mounts no credential", () => {
+  const objs = render();
+  const cron = one(objs, "CronJob", LISTINGS_READ);
+  const api = one(objs, "Deployment", API);
+  const job = one(objs, "Job", SCHEMA_JOB);
+  const c = soleContainer(cron);
+  const pod = podSpec(cron);
+
+  // Shipped suspended: nothing is read until the listings are activated.
+  assert.equal(cron["spec"]["suspend"], true, "the listings-read CronJob is suspended");
+  assert.equal(cron["spec"]["concurrencyPolicy"], "Forbid");
+  assert.equal(cron["metadata"]["namespace"], NAMESPACE);
+  assert.deepEqual(c["command"], ["node", "dist/portal-read.js"]);
+  assert.equal(c["args"], undefined);
+  assert.equal(c["image"], soleContainer(api)["image"], "the API's pinned image");
+
+  // DATABASE_URL from the CNPG app URI and the pages from the ConfigMap; nothing else.
+  const env = new Map((c["env"] as Obj[]).map((e) => [e["name"] as string, e]));
+  assert.deepEqual([...env.keys()].sort(), ["DATABASE_URL", PUBLIC_LISTING_ENV.pages].sort());
+  assert.deepEqual(env.get("DATABASE_URL")!["valueFrom"], { secretKeyRef: { name: DB_SECRET, key: "uri" } });
+  const ref = env.get(PUBLIC_LISTING_ENV.pages)!["valueFrom"]?.["configMapKeyRef"] as Obj | undefined;
+  assert.ok(ref, `${PUBLIC_LISTING_ENV.pages} comes from a ConfigMap`);
+  assert.equal(ref["name"], LISTINGS_PAGES);
+  assert.notEqual(ref["optional"], true, "a missing ConfigMap fails the Pod, not the read");
+
+  // No credential: no volumes or mounts, no envFrom, no ServiceAccount token,
+  // and the database URI is the only Secret referenced.
+  assert.equal(pod["volumes"], undefined, "no volumes");
+  assert.equal(c["volumeMounts"], undefined, "no volume mounts");
+  assert.equal(c["envFrom"], undefined, "no envFrom");
+  assert.equal(pod["automountServiceAccountToken"], false);
+  const secretRefs = (c["env"] as Obj[]).flatMap((e) => (e["valueFrom"]?.["secretKeyRef"] ? [e["valueFrom"]["secretKeyRef"]] : []));
+  assert.deepEqual(secretRefs, [{ name: DB_SECRET, key: "uri" }], "only the database URI Secret");
+
+  // The ConfigMap holds a configuration the reader accepts, on fixture hosts only.
+  const cm = one(objs, "ConfigMap", LISTINGS_PAGES);
+  assert.equal(cm["metadata"]["namespace"], NAMESPACE);
+  const raw = cm["data"]?.[ref["key"] as string] as string | undefined;
+  assert.ok(raw, `ConfigMap/${LISTINGS_PAGES} carries key ${ref["key"]}`);
+  const config = loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: raw });
+  assert.ok(config && config.listings.length > 0, "at least one listing the reader accepts");
+  for (const l of config.listings) {
+    const host = new URL(l.url).hostname;
+    assert.ok(/(^|\.)(example\.(com|org|net)|invalid)$/.test(host), `${l.subject}: ${l.url} is a fixture URL on a reserved domain`);
+  }
+
+  // Syncs after the schema Job, like the other database readers.
+  assert.ok(wave(cron) > wave(job), `the listings read (wave ${wave(cron)}) syncs after the schema Job (wave ${wave(job)})`);
+  const validated = validate(kustomizeBuild(OVERLAY)).map((o) => `${o["kind"]} ${o["metadata"]?.["name"]}`);
+  assert.ok(validated.includes(`CronJob ${LISTINGS_READ}`), "the listings-read CronJob is schema-validated");
+  assert.ok(validated.includes(`ConfigMap ${LISTINGS_PAGES}`), "the listing pages ConfigMap is schema-validated");
+});
+
+test("the listings-read CronJob command is the build output of src/portal-read.ts in the image build, not a checked-in dist file", async () => {
+  const c = soleContainer(one(render(), "CronJob", LISTINGS_READ));
+  const script = (c["command"] as string[])[1]!;
+  assert.equal(script, "dist/portal-read.js");
+
+  // Nothing under dist/ is tracked: the file can only come from the build.
+  const tracked = execFileSync("git", ["ls-files", "--", "dist", script], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(tracked.trim(), "", "no checked-in dist file");
+  assert.ok(existsSync(join(repoRoot, "src", "portal-read.ts")), "the source entrypoint");
+
+  // The image's build stage compiles src/ with `npm run build` and ships that dist/.
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  assert.match(dockerfile, /^COPY src \.\/src$/m);
+  assert.match(dockerfile, /^RUN npm run build$/m);
+  assert.match(dockerfile, /^COPY --from=build \/app\/dist \.\/dist$/m);
+  assert.doesNotMatch(dockerfile, /^COPY (?!--from=build)\S*dist/m, "no dist/ copied from the build context");
+
+  // That build emits exactly the file the command names.
+  const build = await buildEntrypoints("listings-cron");
+  try {
+    assert.ok(existsSync(manifestScriptIn(build, script)), `the build emits ${script}`);
+  } finally {
+    build.remove();
+  }
+});
+
+test("the overlay keeps its database and registry pull references beside the listings-read CronJob", () => {
+  const objs = render();
+  assert.ok(objs.some((o) => o["kind"] === "CronJob" && o["metadata"]["name"] === LISTINGS_READ));
+  one(objs, "Cluster", DB_CLUSTER);
+  const pull = one(objs, "ExternalSecret", PULL_SECRET);
+  assert.equal(pull["spec"]["target"]["name"], PULL_SECRET);
+  const dbUrl = { secretKeyRef: { name: DB_SECRET, key: "uri" } };
+  for (const [kind, name] of [["Deployment", API], ["Job", SCHEMA_JOB], ["CronJob", "loopcloser-tick"], ["CronJob", LISTINGS_READ]] as const) {
+    const o = one(objs, kind, name);
+    assert.deepEqual(podSpec(o)["imagePullSecrets"], [{ name: PULL_SECRET }], `${kind}/${name} pulls with ${PULL_SECRET}`);
+    const env = (soleContainer(o)["env"] as Obj[]).find((e) => e["name"] === "DATABASE_URL");
+    assert.deepEqual(env?.["valueFrom"], dbUrl, `${kind}/${name} DATABASE_URL from ${DB_SECRET}/uri`);
+  }
+  // The tick stays enabled; only the listings read ships suspended.
+  assert.equal(one(objs, "CronJob", "loopcloser-tick")["spec"]["suspend"], false);
 });
