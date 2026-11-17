@@ -1,5 +1,5 @@
-// LC-RUN-PGSTORE acceptance: the kernel over PgGraphStore against a real
-// Compose replica. Each test gets its own migrated database; stores act as
+// LC-RUN-PGSTORE and LC-RUN-PG-STORE-CORE acceptance: PgGraphStore, alone and
+// under the kernel, against a real Compose replica. Each test gets its own migrated database; stores act as
 // loopcloser_app, so they need only the app role's grants. Independent store
 // instances each own their own pool, as separate service processes would.
 import { after, before, test } from "node:test";
@@ -8,7 +8,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import pg from "pg";
 import { migrationFiles, migrationsDir, Replica } from "../schema/replica.ts";
-import { Kernel, KernelError, PgGraphStore, type GraphStore, type GraphTx } from "../../src/kernel/index.ts";
+import {
+  Kernel,
+  KernelError,
+  PgGraphStore,
+  type Communication,
+  type Edge,
+  type GraphStore,
+  type GraphTx,
+  type LedgerEvent,
+  type Loop,
+  type Node,
+} from "../../src/kernel/index.ts";
 import { PgTimerStore } from "../../src/timer/pg-timer-store.ts";
 import { experiment, experimentProposal, joe, repoRuns, resultsLand } from "./fixtures.ts";
 
@@ -114,6 +125,152 @@ class HookedStore implements GraphStore {
   }
 }
 
+// ---- LC-RUN-PG-STORE-CORE acceptance ---------------------------------------
+// The GraphStore contract driven directly through PgGraphStore transactions,
+// without the kernel in between, against a migrated local database.
+
+const ISO = "2026-11-10T08:00:00.000Z";
+const core = {
+  person: { id: "lc_who_core_joe", kind: "who", created_at: ISO, status: "active",
+    attributes: { who_type: "person", name: "Joe", contact_points: [{ channel: "email", value: "joe@example.test" }], external_ids: { plane: "u-1" } } },
+  agent: { id: "lc_who_core_juno", kind: "who", created_at: ISO, status: "active",
+    attributes: { who_type: "agent", name: "Juno", contact_points: [], external_ids: {} } },
+  objective: { id: "lc_what_core_ship", kind: "what", created_at: ISO, status: "active",
+    attributes: { what_type: "objective", title: "Ship onboarding", target: "2026-12-01" } },
+  event: { id: "lc_when_core_reply", kind: "when", created_at: ISO, status: "active",
+    attributes: { when_type: "event", event_type: "reply_received", source_binding: { source: "mail", mechanism: "webhook" }, fired_at: null, fire_count: 0 } },
+  calendar: { id: "lc_when_core_review", kind: "when", created_at: ISO, status: "active",
+    attributes: { when_type: "calendar", schedule: { rrule: "FREQ=WEEKLY;BYDAY=MO" }, timezone: "America/New_York", next_fire_at: "2026-11-16T14:00:00Z" } },
+} satisfies Record<string, Node>;
+
+function coreLoop(overrides: Partial<Loop> = {}): Loop {
+  return {
+    id: "lc_loop_core",
+    name: "Ship onboarding flow",
+    loop_type: "outreach",
+    state: "proposed",
+    accountable_who_id: core.person.id,
+    member_node_ids: [core.objective.id, core.event.id, core.calendar.id, core.person.id, core.agent.id], // sorted, as stored
+    closing_when_id: core.event.id,
+    authority: "joe-approves-each",
+    opened_at: null,
+    closed_at: null,
+    close_reason: null,
+    policy_refs: { ageing: { id: "lc_policy_ageing_outreach", version: 1 }, escalation: { id: "lc_policy_esc_outreach", version: 3 } },
+    key_result_ref: { system: "plane", id: "KR-42" },
+    ...overrides,
+  };
+}
+
+const coreEdges: Edge[] = [
+  { id: "lc_edge_core_wait", from_id: core.objective.id, to_id: core.event.id, edge_type: "is_waiting_on",
+    created_by: "agent:juno", created_at: ISO, evidence: null, status: "active" },
+  { id: "lc_edge_core_enables", from_id: core.event.id, to_id: core.objective.id, edge_type: "enables",
+    created_by: "agent:juno", created_at: ISO, evidence: { kind: "ledger_event", id: "lc_evt_core_proposed" }, status: "active" },
+  { id: "lc_edge_core_owns", from_id: core.person.id, to_id: core.objective.id, edge_type: "owns",
+    created_by: "joe", created_at: ISO, evidence: null, status: "retracted" },
+];
+
+const coreEvent: LedgerEvent = {
+  id: "lc_evt_core_proposed",
+  at: ISO,
+  actor: "agent:juno",
+  event_type: "loop_proposed",
+  subject_ids: ["lc_loop_core"],
+  payload: { rationale: "round trip" },
+  idempotency_key: "core-proposed",
+};
+
+test("a PgGraphStore transaction round-trips whos, whats, whens, loops and edges through a migrated local database", { timeout: 120_000 }, async () => {
+  const database = freshDatabase();
+  const store = newStore(database);
+  const nodes = Object.values(core) as Node[];
+
+  await store.transaction(async (tx) => {
+    for (const n of nodes) await tx.putNode(n);
+    await tx.putLoop(coreLoop());
+    await tx.appendEvent(coreEvent);
+    for (const e of coreEdges) await tx.putEdge(e);
+  });
+  // A later transaction updates what the first wrote: the loop moves on and loses a member.
+  const opened = coreLoop({
+    state: "open",
+    opened_at: "2026-11-10T09:00:00.000Z",
+    member_node_ids: [core.objective.id, core.event.id, core.calendar.id, core.person.id],
+  });
+  const retracted: Edge = { ...coreEdges[0]!, status: "retracted" };
+  await store.transaction(async (tx) => {
+    await tx.putLoop(opened);
+    await tx.putEdge(retracted);
+  });
+
+  // A fresh instance, on its own pool, reads back exactly what was written.
+  const read = await newStore(database).read(async (tx) => ({
+    nodes: await tx.listNodes(),
+    byId: await Promise.all(nodes.map((n) => tx.getNode(n.id))),
+    loop: await tx.getLoop(opened.id),
+    loops: await tx.listLoops(),
+    edges: await Promise.all(coreEdges.map((e) => tx.getEdge(e.id))),
+    touching: await tx.edgesTouching(core.objective.id),
+    ledger: await tx.ledger(),
+    missing: [await tx.getNode("lc_who_nobody"), await tx.getLoop("lc_loop_nobody"), await tx.getEdge("lc_edge_nobody")],
+  }));
+  assert.deepEqual(read.byId, nodes);
+  assert.deepEqual(read.nodes, [...nodes].sort((a, b) => a.id.localeCompare(b.id)));
+  assert.deepEqual(read.loop, opened);
+  assert.deepEqual(read.loops, [opened]);
+  assert.deepEqual(read.edges, [retracted, coreEdges[1], coreEdges[2]]);
+  assert.deepEqual(read.touching, [coreEdges[1]], "only active edges touch a node");
+  assert.deepEqual(read.ledger, [coreEvent]);
+  assert.deepEqual(read.missing, [undefined, undefined, undefined]);
+
+  // A loop proposed without a key-result reference reads back without one.
+  const { key_result_ref: _omitted, ...bare } = coreLoop({ id: "lc_loop_core_bare" });
+  await store.transaction((tx) => tx.putLoop(bare));
+  assert.deepEqual(await store.read((tx) => tx.getLoop(bare.id)), bare);
+});
+
+test("a transaction that throws after partial writes leaves no row behind", { timeout: 120_000 }, async () => {
+  const database = freshDatabase();
+  const store = newStore(database);
+  const empty = await counts(database);
+  assert.ok(Object.values(empty).every((n) => n === 0), JSON.stringify(empty));
+
+  const communication: Communication = {
+    id: "lc_comm_core", thread_id: "thread-core", channel: "email", direction: "outbound",
+    participant_who_ids: [core.person.id], at: ISO, body_pointer: "s3://loopcloser/bodies/core",
+    body_hash: `sha256:${"b".repeat(64)}`, loop_id: "lc_loop_core", sent_under_authority: "joe-approves-each",
+  };
+  let seenInside: Loop | undefined;
+  await assert.rejects(
+    store.transaction(async (tx) => {
+      for (const n of Object.values(core) as Node[]) await tx.putNode(n);
+      for (const e of coreEdges) await tx.putEdge(e);
+      await tx.putLoop(coreLoop());
+      await tx.appendEvent(coreEvent);
+      await tx.putCommunication(communication);
+      await tx.putSendRequest({ communication_id: communication.id, loop_id: "lc_loop_core", authority: "joe-approves-each",
+        status: "pending_approval", requested_by: "agent:juno", requested_at: ISO });
+      await tx.enqueue({ ledger_event_id: coreEvent.id, topic: "send", payload: { communication_id: communication.id }, created_at: ISO });
+      seenInside = await tx.getLoop("lc_loop_core");
+      throw new Error("injected failure after partial writes");
+    }),
+    /injected failure after partial writes/,
+  );
+  assert.equal(seenInside?.id, "lc_loop_core", "the writes were made inside the transaction before it threw");
+  assert.deepEqual(await counts(database), empty);
+  assert.equal(await newStore(database).read((tx) => tx.findEventByIdempotencyKey(coreEvent.idempotency_key!)), undefined);
+
+  // The same writes, committed, are all there: the rollback, not the writes, emptied the tables.
+  await store.transaction(async (tx) => {
+    for (const n of Object.values(core) as Node[]) await tx.putNode(n);
+    await tx.putLoop(coreLoop());
+    await tx.appendEvent(coreEvent);
+  });
+  const committed = await counts(database);
+  assert.deepEqual([committed["nodes"], committed["loops"], committed["ledger_events"]], [5, 1, 1]);
+});
+
 test("a loop accepted through one PgGraphStore instance is read back by a fresh instance on the same database", { timeout: 120_000 }, async () => {
   const database = freshDatabase();
   const kernel = new Kernel(newStore(database));
@@ -157,7 +314,7 @@ test("a loop accepted through one PgGraphStore instance is read back by a fresh 
   await assert.rejects(fresh.read((tx) => tx.putNode(joe)), /read-only/);
 });
 
-test("two concurrent transitions of one loop from the same state through independent PgGraphStore instances apply exactly once", { timeout: 120_000 }, async () => {
+test("two independent PgGraphStore instances transitioning the same loop concurrently apply the transition exactly once", { timeout: 120_000 }, async () => {
   const database = freshDatabase();
   const setup = new Kernel(newStore(database));
   const { loop } = await setup.proposeLoop(experimentProposal());
