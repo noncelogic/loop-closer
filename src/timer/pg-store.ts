@@ -5,7 +5,9 @@
 // next_fire_at advances commit together or not at all. Due calendar Whens are
 // claimed with FOR UPDATE SKIP LOCKED, so overlapping ticks never fire the
 // same When, and the ledger's unique idempotency key rejects a double firing.
+// Ledger events go through the shared commit-ordered append (src/db/ledger.ts).
 import pg from "pg";
+import { appendLedgerEvent } from "../db/ledger.ts";
 import {
   DuplicateIdempotencyKeyError,
   type AgeingPolicy,
@@ -16,10 +18,6 @@ import {
   type TimerStore,
   type TimerTx,
 } from "./store.ts";
-import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
-
-const UNIQUE_VIOLATION = "23505";
-const LEDGER_IDEMPOTENCY_CONSTRAINT = "ledger_events_idempotency_key_key";
 
 export interface PgTimerStoreOptions {
   readonly connectionString: string;
@@ -90,21 +88,11 @@ function pgTx(client: pg.PoolClient): TimerTx {
     },
 
     async appendLedgerEvent(event: LedgerEvent) {
-      // Ledger ordering protocol (src/db/ledger-order.ts): held until this transaction ends.
-      await client.query(LEDGER_APPEND_LOCK);
-      try {
-        await client.query(
-          `INSERT INTO ledger_events (id, at, actor, event_type, subject_ids, payload, idempotency_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [event.id, event.at, event.actor, event.event_type, event.subject_ids, event.payload, event.idempotency_key],
-        );
-      } catch (err) {
-        const e = err as { code?: string; constraint?: string };
-        if (e.code === UNIQUE_VIOLATION && e.constraint === LEDGER_IDEMPOTENCY_CONSTRAINT) {
-          throw new DuplicateIdempotencyKeyError(`idempotency key ${event.idempotency_key} already recorded`);
-        }
-        throw err;
-      }
+      await appendLedgerEvent(
+        client,
+        event,
+        (e) => new DuplicateIdempotencyKeyError(`idempotency key ${e.idempotency_key} already recorded`),
+      );
     },
 
     async setNextFireAt(whenId, nextFireAt, schedule) {

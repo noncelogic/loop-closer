@@ -6,8 +6,10 @@
 // with `FOR UPDATE SKIP LOCKED`, so a tick that overlaps another never sees a
 // When the other holds; once that tick commits, the When's next_fire_at has
 // moved past now and it is no longer due. The ledger's unique idempotency key
-// backs this up: a firing can never be recorded twice.
+// backs this up: a firing can never be recorded twice. Ledger events go
+// through the shared commit-ordered append (src/db/ledger.ts).
 import type pg from "pg";
+import { appendLedgerEvent } from "../db/ledger.ts";
 import {
   DuplicateIdempotencyKeyError,
   type AgeingPolicy,
@@ -18,7 +20,6 @@ import {
   type TimerStore,
   type TimerTx,
 } from "./store.ts";
-import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
 
 /** Ledger events that move a loop into a new state; the latest one's `at` is when it entered its current state. */
 const STATE_EVENTS = ["loop_proposed", "loop_accepted", "loop_rejected", "transition"] as const;
@@ -94,22 +95,16 @@ function pgTx(client: pg.PoolClient, ageingPolicies: readonly AgeingPolicy[]): T
     },
 
     async appendLedgerEvent(event: LedgerEvent) {
-      // Ledger ordering protocol (src/db/ledger-order.ts): held until this transaction ends.
-      await client.query(LEDGER_APPEND_LOCK);
+      await client.query("SAVEPOINT lc_append");
       try {
-        await client.query("SAVEPOINT lc_append");
-        await client.query(
-          `INSERT INTO public.ledger_events (id, at, actor, event_type, subject_ids, payload, idempotency_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [event.id, event.at, event.actor, event.event_type, event.subject_ids, event.payload, event.idempotency_key],
+        await appendLedgerEvent(
+          client,
+          event,
+          (e, cause) => new DuplicateIdempotencyKeyError(`idempotency key ${e.idempotency_key} already recorded`, { cause }),
         );
         await client.query("RELEASE SAVEPOINT lc_append");
       } catch (err) {
         await client.query("ROLLBACK TO SAVEPOINT lc_append");
-        const e = err as { code?: string; constraint?: string };
-        if (e.code === "23505" && e.constraint === "ledger_events_idempotency_key_key") {
-          throw new DuplicateIdempotencyKeyError(`idempotency key ${event.idempotency_key} already recorded`, { cause: err });
-        }
         throw err;
       }
     },

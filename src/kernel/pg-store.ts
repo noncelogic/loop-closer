@@ -9,22 +9,21 @@
 // proposal cannot both admit it. Rows a write transaction reads are also
 // taken with FOR UPDATE, so a second store instance working on the same loop
 // waits for the first instead of computing a doomed result. Ledger appends
-// take the ledger ordering lock (src/db/ledger-order.ts), shared with every
-// other ledger writer, so ledger_events.seq order is commit order and
+// go through the shared commit-ordered append (src/db/ledger.ts), which takes
+// the ledger ordering lock (src/db/ledger-order.ts) shared with every other
+// ledger writer, so ledger_events.seq order is commit order and
 // ledgerAfter positions are stable. A deadlock or serialisation failure
 // re-runs the transaction from the start.
 //
 // read() runs REPEATABLE READ READ ONLY: one snapshot, no locks, and every
 // write call is rejected before it reaches the database.
 import type pg from "pg";
-import { LEDGER_APPEND_LOCK } from "../db/ledger-order.ts";
+import { appendLedgerEvent } from "../db/ledger.ts";
 import type { GraphStore, GraphTx } from "./store.ts";
 import type { Communication, Edge, LedgerEvent, Loop, Node, OutboxEntry, SendRequest } from "./types.ts";
 
 /** serialization_failure, deadlock_detected: the transaction is safe to re-run from the start. */
 const RETRYABLE = new Set(["40001", "40P01"]);
-const UNIQUE_VIOLATION = "23505";
-const LEDGER_IDEMPOTENCY_CONSTRAINT = "ledger_events_idempotency_key_key";
 
 export interface PgGraphStoreOptions {
   /** Attempts per transaction when Postgres reports a deadlock or serialisation failure. Default 10. */
@@ -196,7 +195,6 @@ const json = (v: unknown): string | null => (v === null || v === undefined ? nul
 function pgTx(client: pg.PoolClient, writable: boolean): { tx: GraphTx; close: () => void; failure: () => unknown } {
   let open = true;
   let failure: unknown;
-  let ledgerLocked = false;
   /** Rows read in a write transaction are locked until it ends. */
   const lock = writable ? " FOR UPDATE" : "";
 
@@ -302,22 +300,11 @@ function pgTx(client: pg.PoolClient, writable: boolean): { tx: GraphTx; close: (
     },
     async appendEvent(e) {
       write();
-      if (!ledgerLocked) {
-        await query(LEDGER_APPEND_LOCK);
-        ledgerLocked = true;
-      }
-      try {
-        await query(
-          `INSERT INTO public.ledger_events (id, at, actor, event_type, subject_ids, payload, idempotency_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [e.id, e.at, e.actor, e.event_type, e.subject_ids, json(e.payload), e.idempotency_key],
-        );
-      } catch (err) {
-        const pgErr = err as { code?: string; constraint?: string };
-        if (pgErr.code === UNIQUE_VIOLATION && pgErr.constraint === LEDGER_IDEMPOTENCY_CONSTRAINT)
-          throw new Error(`idempotency key ${e.idempotency_key} already in the ledger`, { cause: err });
-        throw err;
-      }
+      await appendLedgerEvent(
+        { query },
+        e,
+        (ev, cause) => new Error(`idempotency key ${ev.idempotency_key} already in the ledger`, { cause }),
+      );
     },
     async findEventByIdempotencyKey(key) {
       const rows = await query(`SELECT ${EVENT_COLUMNS} FROM public.ledger_events WHERE idempotency_key = $1`, [key]);
