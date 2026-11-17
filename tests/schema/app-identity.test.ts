@@ -1,6 +1,6 @@
 // LC-EST-DB-ROLE acceptance: on the estate, the migrate entrypoint connects as
 // `loopcloser`, the CloudNativePG initdb owner, which has no CREATEROLE. The
-// cluster bootstrap (deploy/database.yaml, initdb.postInitSQL, run by the
+// cluster bootstrap (deploy/base/database.yaml, initdb.postInitSQL, run by the
 // operator as superuser) creates `loopcloser_app` first, so 0001's role guard
 // finds it and the migrations apply under the owning identity with least
 // privilege. This replays that shape on a Compose replica: a NOSUPERUSER
@@ -26,7 +26,7 @@ after(() => {
 
 /** The superuser statements the CNPG cluster runs at bootstrap. */
 function bootstrapSql(): string[] {
-  const cluster = parse(readFileSync(join(repoRoot, "deploy", "database.yaml"), "utf8"));
+  const cluster = parse(readFileSync(join(repoRoot, "deploy", "base", "database.yaml"), "utf8"));
   return (cluster?.spec?.bootstrap?.initdb?.postInitSQL ?? []) as string[];
 }
 
@@ -67,9 +67,9 @@ test(
     assert.notEqual(bare.status, 0, "0001 must not be able to create loopcloser_app without CREATEROLE");
     assert.match(bare.stderr, /permission denied to create role/);
 
-    // Cluster bootstrap, as superuser, exactly as deploy/database.yaml declares it.
+    // Cluster bootstrap, as superuser, exactly as deploy/base/database.yaml declares it.
     const statements = bootstrapSql();
-    assert.ok(statements.length > 0, "deploy/database.yaml must declare initdb.postInitSQL");
+    assert.ok(statements.length > 0, "deploy/base/database.yaml must declare initdb.postInitSQL");
     for (const stmt of statements) db.psql(stmt, { database: "postgres" });
     assert.equal(
       db.psql(

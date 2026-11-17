@@ -44,7 +44,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
 /**
  * Where the per-agent API keys are mounted: the `loopcloser-api-keys` secret
- * (deploy/external-secrets.yaml), one file per agent principal holding its key.
+ * (deploy/base/external-secrets.yaml), one file per agent principal holding its key.
  */
 export const API_KEYS_DIR = "/etc/loopcloser/api-keys";
 

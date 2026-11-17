@@ -20,7 +20,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       # loop-closer's own pull-only credential (registry-credential-per-product v2),
-      # synced from OpenBao by deploy/external-secrets.yaml.
+      # synced from OpenBao by deploy/base/external-secrets.yaml.
       imagePullSecrets:
         - name: loopcloser-registry-pull
       securityContext:
