@@ -29,6 +29,10 @@ spec:
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
+          # loop-closer's own pull-only credential (registry-credential-per-product v2),
+          # synced from OpenBao by deploy/external-secrets.yaml.
+          imagePullSecrets:
+            - name: loopcloser-registry-pull
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000

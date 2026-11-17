@@ -294,6 +294,51 @@ test("kustomize build renders and the Deployment env matches the frozen config c
   }
 });
 
+// LC-D1b-PULL acceptance: every Pod template that runs the loopcloser image
+// pulls it with loop-closer's own pull secret (policy
+// registry-credential-per-product v2: one pull-only credential per product).
+const PULL_SECRET = "loopcloser-registry-pull";
+
+function podTemplates(o: Obj): Obj[] {
+  switch (o["kind"]) {
+    case "Pod":
+      return [o["spec"]];
+    case "Deployment":
+    case "StatefulSet":
+    case "DaemonSet":
+    case "ReplicaSet":
+    case "Job":
+      return [o["spec"]["template"]["spec"]];
+    case "CronJob":
+      return [o["spec"]["jobTemplate"]["spec"]["template"]["spec"]];
+    default:
+      return [];
+  }
+}
+
+test("every loopcloser Pod template in the rendered manifests pulls with imagePullSecret loopcloser-registry-pull", () => {
+  const objs = render();
+  const seen: string[] = [];
+  for (const o of objs) {
+    for (const pod of podTemplates(o)) {
+      const images = [...(pod["initContainers"] ?? []), ...(pod["containers"] ?? [])].map((c: Obj) => c["image"] as string);
+      if (!images.some((i) => i === IMAGE || i.startsWith(`${IMAGE}:`) || i.startsWith(`${IMAGE}@`))) continue;
+      seen.push(identity(o));
+      assert.deepEqual(pod["imagePullSecrets"], [{ name: PULL_SECRET }], `${identity(o)} imagePullSecrets`);
+    }
+  }
+  assert.deepEqual(
+    seen.sort(),
+    [`apps/v1 Deployment ${NAMESPACE}/loopcloser`, `batch/v1 CronJob ${NAMESPACE}/loopcloser-tick`].sort(),
+    "the loopcloser Pod templates",
+  );
+
+  // The pull secret is the one the package syncs from OpenBao.
+  const es = objs.filter((o) => o["kind"] === "ExternalSecret" && o["spec"]?.["target"]?.["name"] === PULL_SECRET);
+  assert.equal(es.length, 1, `an ExternalSecret builds ${PULL_SECRET}`);
+  assert.equal(es[0]!["spec"]["target"]["template"]?.["type"], "kubernetes.io/dockerconfigjson");
+});
+
 // LC-EST-DB-ROLE acceptance: the app role 0001_loop_model.sql grants to is
 // created by the operator at bootstrap (postInitSQL runs as the postgres
 // superuser), so the migrate entrypoint, connecting as the initdb owner
