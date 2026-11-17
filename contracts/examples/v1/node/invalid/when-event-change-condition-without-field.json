@@ -1,0 +1,19 @@
+{
+  "id": "lc_when_listing_status",
+  "kind": "when",
+  "created_at": "2026-11-07T15:30:00Z",
+  "status": "active",
+  "attributes": {
+    "when_type": "event",
+    "event_type": "listing_status_observed",
+    "source_binding": {
+      "source": "cortexplane",
+      "mechanism": "poll"
+    },
+    "fired_at": "2026-11-07T16:00:00Z",
+    "fire_count": 1,
+    "change_condition": {
+      "last_value": "in_review"
+    }
+  }
+}

@@ -131,3 +131,102 @@ test("transition validates states and close reasons", async () => {
   assert.equal(abandoned.loop.close_reason, "abandoned");
   await assert.rejects(kernel.fireEvent({ when_id: "lc_when_missing", idempotency_key: "k" }), { code: "not_found" });
 });
+
+// LC-CP-WHEN-CHANGE: an event When may declare a change condition naming one
+// payload field; fire_event by event_type + source fires it only when that
+// field's value differs from its value at the When's last firing.
+const watchedStatus = {
+  ...repoRuns,
+  attributes: { ...repoRuns.attributes, change_condition: { field: "status" } },
+};
+
+async function watchedLoop() {
+  const env = newKernel();
+  const { loop } = await env.kernel.proposeLoop(
+    experimentProposal({ nodes: experimentProposal().nodes.map((n) => ("id" in n && n.id === repoRuns.id ? watchedStatus : n)) }),
+  );
+  await env.kernel.acceptLoop(loop.id, { acceptor: "joe" });
+  await env.kernel.transition(loop.id, { to_state: "waiting", actor: "agent:juno", evidence, idempotency_key: "w-1" });
+  const report = (status: unknown, key: string) =>
+    env.kernel.fireEvent({ event_type: "repo_runs", source: "ci", payload: { status, run: key }, idempotency_key: key });
+  const when = () => env.store.read((tx) => tx.getNode(repoRuns.id));
+  return { ...env, loopId: loop.id, report, when };
+}
+
+test("an event with an unchanged value does not fire a change-condition When", async () => {
+  const { kernel, loopId, report, when, tick } = await watchedLoop();
+
+  // The first observation always fires and records the value.
+  const first = await report("red", "obs-1");
+  assert.equal(first.applied, true);
+  assert.deepEqual(first.ledger_event.payload["when_ids"], [repoRuns.id]);
+  assert.deepEqual(first.loop_ids, [loopId]);
+  assert.equal((await kernel.getLoop(loopId)).state, "open");
+  const afterFirst = await when();
+  assertValid("node", afterFirst);
+  assert.equal(afterFirst?.attributes["fire_count"], 1);
+  assert.deepEqual(afterFirst?.attributes["change_condition"], { field: "status", last_value: "red" });
+
+  // The same value again: recorded as an observation, but the When does not fire.
+  await kernel.transition(loopId, { to_state: "waiting", actor: "agent:juno", evidence, idempotency_key: "w-2" });
+  tick(60);
+  const same = await report("red", "obs-2");
+  assert.equal(same.applied, true);
+  assertValid("ledger-event", same.ledger_event);
+  assert.equal(same.ledger_event.event_type, "when_fired");
+  assert.deepEqual(same.ledger_event.payload["when_ids"], []);
+  assert.deepEqual(same.ledger_event.payload["unchanged_when_ids"], [repoRuns.id]);
+  assert.deepEqual(same.loop_ids, []);
+  assert.equal((await kernel.getLoop(loopId)).state, "waiting");
+  const afterSame = await when();
+  assert.equal(afterSame?.attributes["fire_count"], 1);
+  assert.equal(afterSame?.attributes["fired_at"], afterFirst?.attributes["fired_at"]);
+
+  // A payload that does not report the watched field is no observation of it.
+  const missing = await kernel.fireEvent({ event_type: "repo_runs", source: "ci", payload: { run: "x" }, idempotency_key: "obs-3" });
+  assert.deepEqual(missing.loop_ids, []);
+  assert.equal((await when())?.attributes["fire_count"], 1);
+});
+
+test("a changed value fires the change-condition When once and records the new value", async () => {
+  const { kernel, loopId, report, when, tick } = await watchedLoop();
+  await report("red", "obs-1");
+  await kernel.transition(loopId, { to_state: "waiting", actor: "agent:juno", evidence, idempotency_key: "w-2" });
+
+  tick(60);
+  const changed = await report("green", "obs-2");
+  assert.equal(changed.applied, true);
+  assert.deepEqual(changed.ledger_event.payload["when_ids"], [repoRuns.id]);
+  assert.deepEqual(changed.loop_ids, [loopId]);
+  assert.equal((await kernel.getLoop(loopId)).state, "open");
+  const fired = await when();
+  assertValid("node", fired);
+  assert.equal(fired?.attributes["fire_count"], 2);
+  assert.equal(fired?.attributes["fired_at"], "2026-11-10T09:01:00.000Z");
+  assert.deepEqual(fired?.attributes["change_condition"], { field: "status", last_value: "green" });
+
+  // Once: the same delivery replays without a second firing, and the new value repeated does not fire.
+  const replay = await report("green", "obs-2");
+  assert.equal(replay.applied, false);
+  const repeated = await report("green", "obs-3");
+  assert.deepEqual(repeated.ledger_event.payload["when_ids"], []);
+  assert.equal((await when())?.attributes["fire_count"], 2);
+
+  // Structured values compare by value, not identity; null is an observed value.
+  const objects = await report({ a: 1 }, "obs-4");
+  assert.deepEqual(objects.ledger_event.payload["when_ids"], [repoRuns.id]);
+  assert.deepEqual((await report({ a: 1 }, "obs-5")).ledger_event.payload["when_ids"], []);
+  assert.deepEqual((await report(null, "obs-6")).ledger_event.payload["when_ids"], [repoRuns.id]);
+  assert.deepEqual((await report(null, "obs-7")).ledger_event.payload["when_ids"], []);
+});
+
+test("a When without a change condition fires on every matching event", async () => {
+  const { kernel, store } = await openLoop();
+  for (const key of ["plain-1", "plain-2"]) {
+    const fired = await kernel.fireEvent({ event_type: "repo_runs", source: "ci", payload: { status: "red" }, idempotency_key: key });
+    assert.deepEqual(fired.ledger_event.payload["when_ids"], [repoRuns.id]);
+  }
+  const when = await store.read((tx) => tx.getNode(repoRuns.id));
+  assert.equal(when?.attributes["fire_count"], 2);
+  assert.equal(when?.attributes["change_condition"], undefined);
+});

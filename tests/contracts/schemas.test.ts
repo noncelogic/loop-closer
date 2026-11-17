@@ -55,3 +55,39 @@ test("typed supersession vocabulary is exactly the SPEC B2.8 set", () => {
     "valid_during",
   ]);
 });
+
+test("the event When schema declares the change condition", () => {
+  const ajv = createValidator();
+  const node = schemas.get("node");
+  const validate = ajv.getSchema(String(node?.$id));
+  assert.ok(validate, "node schema compiles");
+  const defs = node?.$defs as Record<string, { properties?: Record<string, { required?: string[]; properties?: Record<string, unknown> }>; required?: string[] }>;
+  const condition = defs.event_when?.properties?.["change_condition"];
+  assert.ok(condition, "event_when declares change_condition");
+  assert.deepEqual(condition.required, ["field"]);
+  assert.deepEqual(Object.keys(condition.properties ?? {}).sort(), ["field", "last_value"]);
+  assert.ok(!defs.event_when?.required?.includes("change_condition"), "the condition is optional");
+
+  const when = (attributes: Record<string, unknown>) => ({
+    id: "lc_when_watch",
+    kind: "when",
+    created_at: "2026-11-07T15:30:00Z",
+    status: "active",
+    attributes: {
+      when_type: "event",
+      event_type: "status_observed",
+      source_binding: { source: "cortexplane", mechanism: "poll" },
+      fired_at: null,
+      fire_count: 0,
+      ...attributes,
+    },
+  });
+  assert.ok(validate(when({})), "a When without a condition stays valid");
+  assert.ok(validate(when({ change_condition: { field: "status" } })), "never fired: no last value yet");
+  assert.ok(validate(when({ change_condition: { field: "status", last_value: null } })), "null is an observed value");
+  assert.ok(validate(when({ change_condition: { field: "status", last_value: { a: [1] } } })));
+  assert.equal(validate(when({ change_condition: {} })), false, "the condition names a field");
+  assert.equal(validate(when({ change_condition: { field: "" } })), false);
+  assert.equal(validate(when({ change_condition: { field: "status", fields: ["x"] } })), false, "one field only");
+  assert.equal(validate(when({ change_condition: "status" })), false);
+});

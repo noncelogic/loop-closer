@@ -114,7 +114,17 @@
           }
         },
         "fired_at": { "$ref": "_common.schema.json#/$defs/nullable_timestamp" },
-        "fire_count": { "type": "integer", "minimum": 0 }
+        "fire_count": { "type": "integer", "minimum": 0 },
+        "change_condition": {
+          "description": "Optional. fire_event by event_type + source fires this When only when payload[field] differs (by value) from last_value; the first observation always fires. last_value is the field's value at the When's last firing, absent until the first. A payload without the field does not fire it. A When without a condition fires on every matching event.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field"],
+          "properties": {
+            "field": { "type": "string", "minLength": 1 },
+            "last_value": {}
+          }
+        }
       }
     },
     "calendar_when": {
