@@ -100,3 +100,30 @@ jobs:
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # The pull-request dry run of .github/workflows/estate-image.yml (policy
+  # main-stays-green). The publish can only act on main, on the estate's
+  # self-hosted runners; this job builds the same context and Dockerfile on a
+  # GitHub-hosted runner, tags it like the publish without a registry, pushes
+  # nothing, and runs the listings-read CronJob's command in the built image
+  # (deploy/overlays/aks-obs-01/listings-read.yaml), so a merge cannot publish
+  # an image that lacks the portal-read entrypoint. Reads no secret and no
+  # estate configuration. Checked by test/deploy/estate-image.test.ts.
+  estate-image-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: loopcloser:sha-${{ github.sha }}
+      - name: Run the portal-read entrypoint in the built image
+        run: bash .github/scripts/estate-image-smoke.sh loopcloser:sha-${{ github.sha }} node dist/portal-read.js

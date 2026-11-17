@@ -50,6 +50,17 @@ empty.
   `exportEnv: false` keeps both out of later steps' environment. They reach
   only `docker/login-action`.
 
+## Pull-request dry run
+
+The publish acts only on `main`, so every pull request proves it first: the
+`ci` workflow's `estate-image-dry-run` job builds the same context and
+Dockerfile on a GitHub-hosted runner, tags it `loopcloser:sha-<commit>`
+without a registry, pushes nothing, and runs the listings-read CronJob's
+command (`node dist/portal-read.js`) in the built image through
+`.github/scripts/estate-image-smoke.sh`. It reads no secret and no repository
+variable. `test/deploy/estate-image.test.ts` checks the job and runs the same
+build and smoke check.
+
 ## Verifying a publish
 
 1. Merge to `main`, then check that the `estate-image` run's `publish` job
