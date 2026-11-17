@@ -12,7 +12,7 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import pg from "pg";
@@ -20,7 +20,14 @@ import { Replica, repoRoot } from "../schema/replica.ts";
 import { Kernel, PgGraphStore, type Node } from "../../src/kernel/index.ts";
 import { ANTHROPIC_LISTINGS_SENSOR, LISTING_STATUS_CHANGED, PUBLIC_LISTING_ENV } from "../../src/sensors/index.ts";
 
-const ENTRYPOINT = "dist/portal-read.js";
+const ENTRYPOINT = "portal-read.js";
+
+// A private build output, not the shared `dist/`: test files run in parallel
+// and other entrypoint tests rebuild `dist/`, so a child could import a module
+// mid-rewrite. The directory sits beside `dist/` at the repo root so the build
+// keeps its layout (src/contracts/index.ts resolves `contracts/` two levels up)
+// and its package.json/node_modules resolution. Removed during teardown.
+const outDir = mkdtempSync(join(repoRoot, "dist-portal-entrypoint-"));
 const SUBJECT = "rove-connector";
 const WHEN_ID = "lc_when_listing_status_changed";
 const HEARTBEAT_WHEN_ID = `lc_when_sensor_${ANTHROPIC_LISTINGS_SENSOR.id}_heartbeat`;
@@ -37,7 +44,7 @@ let pagesEnv = "";
 
 before(
   async () => {
-    execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "inherit" });
+    execFileSync("npm", ["run", "build", "--", "--outDir", outDir], { cwd: repoRoot, stdio: "inherit" });
     db.up();
     db.migrate();
     await new Promise<void>((resolve, reject) => {
@@ -52,8 +59,12 @@ before(
 );
 after(
   async () => {
-    await new Promise<void>((resolve) => directory.close(() => resolve()));
-    db.down();
+    try {
+      await new Promise<void>((resolve) => directory.close(() => resolve()));
+      db.down();
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   },
   { timeout: 120_000 },
 );
@@ -100,7 +111,7 @@ async function bindListingWhen(): Promise<void> {
 /** Runs the built entrypoint asynchronously, so the stub directory keeps serving. */
 async function invoke(): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const env: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: db.databaseUrl(), [PUBLIC_LISTING_ENV.pages]: pagesEnv };
-  const child = spawn("node", [ENTRYPOINT], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+  const child = spawn("node", [join(outDir, ENTRYPOINT)], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d));
@@ -128,7 +139,7 @@ function heartbeats(): number {
 }
 
 test("the build emits the portal-read entrypoint", () => {
-  assert.ok(existsSync(join(repoRoot, ENTRYPOINT)), `npm run build must emit ${ENTRYPOINT}`);
+  assert.ok(existsSync(join(outDir, ENTRYPOINT)), `npm run build must emit ${ENTRYPOINT}`);
 });
 
 test("a listing whose status changed since the previous invocation records one fire_event on its bound When in Postgres", { timeout: 120_000 }, async () => {
