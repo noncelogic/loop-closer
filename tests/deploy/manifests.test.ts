@@ -26,33 +26,27 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { parseAllDocuments } from "yaml";
 import { CONFIG_ENV, DEFAULT_PORT, loadConfig } from "../../src/config.ts";
+import {
+  DEAD_PROXY,
+  kubeconformReport,
+  kubectlDryRun,
+  kustomizeBuild,
+  offlineEnv,
+  repoRoot,
+  SCHEMA_DIR,
+  SCHEMA_LOCATIONS,
+  validate,
+  type KubeconformResult,
+  type Obj,
+} from "./manifest-check.ts";
 
-const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-const deployDir = join(repoRoot, "deploy");
+const deployDir = join(repoRoot, "deploy", "base");
 
 const NAMESPACE = "loop-closer";
 const IMAGE = "ghcr.io/noncelogic/loop-closer";
 const DB_CLUSTER = "loopcloser-db";
 // CloudNativePG publishes the app-role connection string as `<cluster>-app`/uri.
 const DB_SECRET = `${DB_CLUSTER}-app`;
-
-type Obj = Record<string, any>;
-
-function onPath(bin: string): boolean {
-  try {
-    execFileSync(bin, ["version"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function kustomizeBuild(dir: string): string {
-  const explicit = process.env["KUSTOMIZE"];
-  if (explicit) return execFileSync(explicit, ["build", dir], { encoding: "utf8" });
-  if (onPath("kustomize")) return execFileSync("kustomize", ["build", dir], { encoding: "utf8" });
-  return execFileSync(process.env["KUBECTL"] || "kubectl", ["kustomize", dir], { encoding: "utf8" });
-}
 
 const KUSTOMIZATION_FILES = new Set(["kustomization.yaml", "kustomization.yml", "Kustomization"]);
 
@@ -68,139 +62,12 @@ function overlays(): string[] {
   return [...new Set(files.map((f) => dirname(f)))].sort();
 }
 
-// The environment every validator runs in: no kubeconfig and no in-cluster
-// service variables, so there is no cluster to reach and no credential to
-// read even by accident; and every HTTP(S) request goes to a proxy that does
-// not exist, so a validator that tried to fetch anything would fail loudly
-// rather than depend on the network.
-const DEAD_PROXY = "http://127.0.0.1:9";
-function offlineEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, KUBECONFIG: join(repoRoot, ".no-kubeconfig") };
-  delete env["KUBERNETES_SERVICE_HOST"];
-  delete env["KUBERNETES_SERVICE_PORT"];
-  for (const v of ["NO_PROXY", "no_proxy"]) delete env[v];
-  for (const v of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]) env[v] = DEAD_PROXY;
-  return env;
-}
-
-// kubectl's client-side dry-run in its offline form: `--local` decodes and
-// maps every object without asking an API server, and `--dry-run=client`
-// guarantees nothing is sent. This catches undecodable documents (bad YAML, no
-// kind) but works on unstructured objects, so it does not check field types;
-// kubeconformValidate below does. Throws (with kubectl's stderr) on any object
-// kubectl rejects.
-function kubectlDryRun(manifests: string): Obj[] {
-  const kubectl = process.env["KUBECTL"] || "kubectl";
-  const env = offlineEnv();
-  const out = execFileSync(
-    kubectl,
-    [
-      "annotate",
-      "--local",
-      "--dry-run=client",
-      "--filename=-",
-      "--output=yaml",
-      "manifest-check.loopcloser.dev/validated=true",
-    ],
-    { input: manifests, encoding: "utf8", env, stdio: ["pipe", "pipe", "pipe"] },
-  );
-  const docs = parseAllDocuments(out)
-    .map((doc) => {
-      assert.equal(doc.errors.length, 0, String(doc.errors[0]));
-      return doc.toJS() as Obj | null;
-    })
-    .filter((o): o is Obj => o !== null);
-  return docs.flatMap((o) => (o["kind"] === "List" ? (o["items"] as Obj[]) : [o]));
-}
-
-// Schemas are checked in under tests/deploy/schemas/ (copied from fixed
-// upstream commits; see its README.md and SHA256SUMS), so validation reads
-// local files only and cannot drift with upstream edits or fail on a network
-// error. Built-in kinds validate against the Kubernetes OpenAPI schema for
-// KUBERNETES_VERSION (strict: unknown fields fail too); CRD kinds (CloudNativePG
-// Cluster, ExternalSecret) against the CRDs-catalog extraction of the
-// operator's own CRD schema. A kind with no schema fails; nothing is skipped.
-const KUBERNETES_VERSION = "1.34.1";
-const SCHEMA_DIR = join(repoRoot, "tests", "deploy", "schemas");
-const SCHEMA_LOCATIONS = [
-  join(SCHEMA_DIR, "kubernetes", "{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}", "{{ .ResourceKind }}{{ .KindSuffix }}.json"),
-  join(SCHEMA_DIR, "crds", "{{ .Group }}", "{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json"),
-];
-
-type KubeconformResult = {
-  kind: string;
-  name: string;
-  version: string;
-  status: string;
-  msg: string;
-  validationErrors?: { path: string; msg: string }[];
-};
-
-// Runs kubeconform, offline, over the manifests and returns its verdict on
-// every object (statusValid, statusInvalid, statusError, statusSkipped, ...).
-// kubeconform exits non-zero when any object is not valid but still prints
-// its JSON report; only a run with no parseable report (tool missing, crash)
-// throws here, so callers can tell a schema rejection from a broken tool.
-function kubeconformReport(manifests: string): KubeconformResult[] {
-  const kubeconform = process.env["KUBECONFORM"] || "kubeconform";
-  const args = [
-    "-strict",
-    "-summary",
-    "-verbose",
-    "-output=json",
-    `-kubernetes-version=${KUBERNETES_VERSION}`,
-    ...SCHEMA_LOCATIONS.map((l) => `-schema-location=${l}`),
-    "-",
-  ];
-  let out: string;
-  try {
-    out = execFileSync(kubeconform, args, {
-      input: manifests,
-      encoding: "utf8",
-      env: offlineEnv(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  } catch (err) {
-    const e = err as Error & { stdout?: string; stderr?: string };
-    try {
-      return (JSON.parse(e.stdout ?? "") as { resources: KubeconformResult[] }).resources;
-    } catch {
-      throw new Error(`kubeconform rejected the manifests: ${e.stdout || ""}${e.stderr || ""}${e.stdout || e.stderr ? "" : e.message}`);
-    }
-  }
-  return (JSON.parse(out) as { resources: KubeconformResult[] }).resources;
-}
-
-// Schema validation without an API server: kubeconform checks each object's
-// fields and types against its pinned schema (a Deployment with
-// `spec.replicas: "invalid"` fails here, though kubectl's dry-run accepts it).
-// Returns the identity of every object it found valid; throws with
-// kubeconform's findings when any object is invalid, errors, or is skipped.
-function kubeconformValidate(manifests: string): string[] {
-  const resources = kubeconformReport(manifests);
-  const notValid = resources.filter((r) => r.status !== "statusValid");
-  if (notValid.length > 0) throw new Error(`kubeconform did not validate: ${JSON.stringify(notValid)}`);
-  return resources.map((r) => `${r.version} ${r.kind} ${r.name}`);
-}
-
-// Both validators, as the overlay check applies them.
-function validate(manifests: string): Obj[] {
-  const validated = kubectlDryRun(manifests);
-  const schemaValid = kubeconformValidate(manifests);
-  assert.deepEqual(
-    schemaValid.sort(),
-    validated.map((o) => `${o["apiVersion"]} ${o["kind"]} ${o["metadata"]?.["name"]}`).sort(),
-    "kubeconform schema-validated exactly the objects kubectl decoded",
-  );
-  return validated;
-}
-
 function identity(o: Obj): string {
   return `${o["apiVersion"]} ${o["kind"]} ${o["metadata"]?.["namespace"] ?? ""}/${o["metadata"]?.["name"]}`;
 }
 
 function render(): Obj[] {
-  assert.ok(existsSync(join(deployDir, "kustomization.yaml")), "deploy/kustomization.yaml must exist");
+  assert.ok(existsSync(join(deployDir, "kustomization.yaml")), "deploy/base/kustomization.yaml must exist");
   return parseAllDocuments(kustomizeBuild(deployDir))
     .map((doc) => {
       assert.equal(doc.errors.length, 0, String(doc.errors[0]));
@@ -372,7 +239,7 @@ test("Dockerfile builds on Node 24 with tsc and runs node dist/main.js", () => {
 test("every kustomize overlay renders and passes kubectl client-side dry-run validation", () => {
   // Also schema-validates every rendered object (kubeconformValidate).
   const dirs = overlays();
-  assert.ok(dirs.includes("deploy"), `expected deploy/ among the overlays, found ${JSON.stringify(dirs)}`);
+  assert.ok(dirs.includes("deploy/base"), `expected deploy/base among the overlays, found ${JSON.stringify(dirs)}`);
 
   for (const dir of dirs) {
     let rendered: string;
@@ -535,7 +402,7 @@ test("rejects a resource carrying a field its schema does not define", () => {
 test("passes the repository's rendered manifests with no kubeconfig and no network", () => {
   assertOffline();
   const dirs = overlays();
-  assert.ok(dirs.includes("deploy"), `expected deploy/ among the overlays, found ${JSON.stringify(dirs)}`);
+  assert.ok(dirs.includes("deploy/base"), `expected deploy/base among the overlays, found ${JSON.stringify(dirs)}`);
   for (const dir of dirs) {
     const rendered = kustomizeBuild(join(repoRoot, dir));
     const objs = parseAllDocuments(rendered)
@@ -573,7 +440,7 @@ test("schema validation uses only the checked-in schemas, with no reference that
     assert.doesNotMatch(l, /:\/\//, `schema location ${l} is a URL`);
   }
 
-  // The checked-in files are exactly the recorded upstream copies.
+  // The checked-in files are exactly the recorded copies (one derived; see README.md).
   const recorded = new Map(
     readFileSync(join(SCHEMA_DIR, "SHA256SUMS"), "utf8")
       .split("\n")
@@ -606,6 +473,7 @@ test("schema validation uses only the checked-in schemas, with no reference that
     "kubernetes/v1.34.1-standalone-strict/service-v1.json",
     "kubernetes/v1.34.1-standalone-strict/deployment-apps-v1.json",
     "kubernetes/v1.34.1-standalone-strict/cronjob-batch-v1.json",
+    "kubernetes/v1.34.1-standalone-strict/job-batch-v1.json",
     "crds/postgresql.cnpg.io/cluster_v1.json",
     "crds/external-secrets.io/externalsecret_v1.json",
   ]) {

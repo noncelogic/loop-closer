@@ -1,0 +1,62 @@
+# Applies db/migrations with the migrate entrypoint (src/migrate.ts) before the
+# API serves: an Argo CD Sync-phase hook in wave 2, after the loopcloser-db
+# cluster (wave 1) and before the API Deployment (wave 3). The migrations are
+# idempotent (applied ones are recorded and skipped), so every sync runs it;
+# BeforeHookCreation deletes the previous run's Job first, leaving the last
+# run's Job and logs in place until the next sync. The image is set by the
+# overlay's `images` pin, the same one the API runs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loopcloser-schema
+  labels:
+    app.kubernetes.io/name: loopcloser
+    app.kubernetes.io/component: schema
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  # Retries cover the window where loopcloser-db-app exists but the primary
+  # is not yet accepting connections.
+  backoffLimit: 4
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loopcloser
+        app.kubernetes.io/component: schema
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      # loop-closer's own pull-only credential (registry-credential-per-product v2),
+      # synced from OpenBao by deploy/base/external-secrets.yaml.
+      imagePullSecrets:
+        - name: loopcloser-registry-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/noncelogic/loop-closer
+          command: ["node", "dist/migrate.js"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: loopcloser-db-app
+                  key: uri
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

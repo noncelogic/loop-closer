@@ -2,7 +2,7 @@
 
 aks-obs-01 pulls the loopcloser image with loop-closer's own pull secret,
 `loopcloser-registry-pull`. That Secret is never applied by hand: the
-`loopcloser-registry-pull` ExternalSecret in `deploy/external-secrets.yaml`
+`loopcloser-registry-pull` ExternalSecret in `deploy/base/external-secrets.yaml`
 (PR #45, LC-D1b-PULL) syncs it from OpenBao through the estate `openbao`
 ClusterSecretStore and renders it as a `kubernetes.io/dockerconfigjson`
 Secret. This page records where that credential lives in OpenBao and how it is

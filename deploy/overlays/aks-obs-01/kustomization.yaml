@@ -1,0 +1,57 @@
+# What the estate's Argo CD syncs to aks-obs-01 (LC-EST-OVERLAY): the base
+# package, every loopcloser container pinned to one estate-registry
+# loopcloser:sha-<commit> image, and the schema Job that applies
+# db/migrations before the API serves. Argo CD sync order, by
+# argocd.argoproj.io/sync-wave:
+#   0  Namespace, ExternalSecrets (API keys, registry pull), Service, CronJob
+#   1  CNPG Cluster loopcloser-db (publishes loopcloser-db-app/uri)
+#   2  Job loopcloser-schema: Sync hook, `node dist/migrate.js`
+#   3  Deployment loopcloser (the API)
+# The tick CronJob stays suspended (deploy/base/tick-cronjob.yaml).
+# Checked by tests/deploy/overlay.test.ts.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: loop-closer
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: loopcloser
+      app.kubernetes.io/managed-by: kustomize
+
+resources:
+  - ../../base
+  - schema-job.yaml
+
+patches:
+  - target:
+      group: postgresql.cnpg.io
+      version: v1
+      kind: Cluster
+      name: loopcloser-db
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          argocd.argoproj.io/sync-wave: "1"
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: loopcloser
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          argocd.argoproj.io/sync-wave: "3"
+
+# One image for the API, the schema Job and the tick CronJob: the
+# `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>` that
+# .github/workflows/estate-image.yml publishes on merge to main
+# (docs/ops/estate-image.md). The registry is the one the
+# loopcloser-registry-pull credential covers (docs/ops/registry-pull.md).
+# Roll out by changing newTag to another published main commit.
+images:
+  - name: ghcr.io/noncelogic/loop-closer
+    newName: ghcr.io/noncelogic/loopcloser
+    newTag: sha-96f1e93b7a2b3811b65ae02ad2235415aa5f9c5a

@@ -15,7 +15,7 @@ import { parse, parseAllDocuments } from "yaml";
 type Obj = Record<string, any>;
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-const deployDir = join(repoRoot, "deploy");
+const deployDir = join(repoRoot, "deploy", "base");
 const RUNBOOK = join(repoRoot, "docs", "ops", "registry-pull.md");
 const PULL_SECRET = "loopcloser-registry-pull";
 

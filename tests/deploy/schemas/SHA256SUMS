@@ -3,5 +3,6 @@ a1ce79eb4a72a1a0f8348f93706b6c67598937d7f371da8cf6d92e09fedb4769  crds/postgresq
 e0eaddebd677c08aa092b2da2264d86ac4fc34eed112b9fac2945b3f00c1e9b1  kubernetes/v1.34.1-standalone-strict/configmap-v1.json
 fb921edacc3ded080ca322233197727f8c110254ba3514e6faade5fa06513ae4  kubernetes/v1.34.1-standalone-strict/cronjob-batch-v1.json
 92b7a333a49124f5300095d3e7786ca2038b7d6e602c309f73e90631377e4b0a  kubernetes/v1.34.1-standalone-strict/deployment-apps-v1.json
+0145719e01bc3ccb536f25e89ac4f49935fb2dd064e6c93878a03029b5c4dd78  kubernetes/v1.34.1-standalone-strict/job-batch-v1.json
 324fae677b98d1a6d54340db0c334d053e8ffbafceb3f73326e41de2610d5843  kubernetes/v1.34.1-standalone-strict/namespace-v1.json
 8bf019854daed511e7c174896a898173fa65d88ec5937c687a37303d4cc9351b  kubernetes/v1.34.1-standalone-strict/service-v1.json

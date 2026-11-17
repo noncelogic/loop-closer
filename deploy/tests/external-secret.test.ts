@@ -4,7 +4,7 @@
 // the per-principal key names the API's boot-time loader reads
 // (src/config.ts: API_KEYS_DIR, loadApiKeys: one file per agent principal).
 //
-// Renders deploy/ with a real kustomize: $KUSTOMIZE if set, else `kustomize`
+// Renders deploy/base/ with a real kustomize: $KUSTOMIZE if set, else `kustomize`
 // on PATH, else `kubectl kustomize` ($KUBECTL or `kubectl`). A missing tool
 // fails the test; it never skips. Nothing here talks to a cluster or reads a
 // secret: the OpenBao payload below is a made-up fixture.
@@ -20,7 +20,7 @@ import { API_KEYS_DIR, loadApiKeys } from "../../src/config.ts";
 type Obj = Record<string, any>;
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-const deployDir = join(repoRoot, "deploy");
+const deployDir = join(repoRoot, "deploy", "base");
 
 const OPENBAO_PATH = "kv/loopcloser/api";
 const STORE = { kind: "ClusterSecretStore", name: "openbao" };

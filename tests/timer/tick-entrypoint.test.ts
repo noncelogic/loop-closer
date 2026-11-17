@@ -1,5 +1,5 @@
 // LC-RUN-TICK acceptance: the build emits the tick entrypoint that
-// deploy/tick-cronjob.yaml runs. One run claims due calendar Whens on
+// deploy/base/tick-cronjob.yaml runs. One run claims due calendar Whens on
 // PgTimerStore at DATABASE_URL, records each firing once in the ledger and
 // exits zero; a run that cannot reach the database exits non-zero.
 //
@@ -28,11 +28,11 @@ before(
 );
 after(() => db.down(), { timeout: 120_000 });
 
-/** The container command of deploy/tick-cronjob.yaml. */
+/** The container command of deploy/base/tick-cronjob.yaml. */
 function cronJobCommand(): string[] {
-  const docs = parseAllDocuments(readFileSync(join(repoRoot, "deploy", "tick-cronjob.yaml"), "utf8")).map((d) => d.toJS());
+  const docs = parseAllDocuments(readFileSync(join(repoRoot, "deploy", "base", "tick-cronjob.yaml"), "utf8")).map((d) => d.toJS());
   const job = docs.find((d) => d?.kind === "CronJob");
-  assert.ok(job, "deploy/tick-cronjob.yaml must define a CronJob");
+  assert.ok(job, "deploy/base/tick-cronjob.yaml must define a CronJob");
   const containers = job.spec.jobTemplate.spec.template.spec.containers as Array<{ name: string; command?: string[] }>;
   const tick = containers.find((c) => c.name === "tick");
   assert.ok(tick?.command, "the tick container must set a command");
@@ -67,7 +67,7 @@ async function runEntrypoint(databaseUrl: string | undefined): Promise<{ status:
   return { status, stdout, stderr };
 }
 
-test("the command in deploy/tick-cronjob.yaml names a file the build emits", () => {
+test("the command in deploy/base/tick-cronjob.yaml names a file the build emits", () => {
   const command = cronJobCommand();
   assert.equal(command[0], "node");
   const script = command[1];

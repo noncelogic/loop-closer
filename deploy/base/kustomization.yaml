@@ -18,8 +18,8 @@ resources:
   - service.yaml
   - tick-cronjob.yaml
 
-# Published by .github/workflows/ci.yml (job `image`). The estate overlay pins
-# a digest or sha-<commit> tag at rollout.
+# Published by .github/workflows/ci.yml (job `image`). deploy/overlays/aks-obs-01,
+# what the estate syncs, pins the estate-registry sha-<commit> image instead.
 images:
   - name: ghcr.io/noncelogic/loop-closer
     newTag: main

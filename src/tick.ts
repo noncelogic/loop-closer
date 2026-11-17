@@ -1,4 +1,4 @@
-// The timer tick entrypoint: `node dist/tick.js` (deploy/tick-cronjob.yaml).
+// The timer tick entrypoint: `node dist/tick.js` (deploy/base/tick-cronjob.yaml).
 //
 // Runs one runTick against PgTimerStore at DATABASE_URL, prints the report as
 // one JSON line, closes the pool and exits. Any failure — no DATABASE_URL, an
