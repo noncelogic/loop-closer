@@ -25,6 +25,8 @@ const deployDir = join(repoRoot, "deploy");
 const OPENBAO_PATH = "kv/loopcloser/api";
 const STORE = { kind: "ClusterSecretStore", name: "openbao" };
 const SECRET = "loopcloser-api-keys";
+const PULL_SECRET = "loopcloser-registry-pull";
+const PULL_OPENBAO_PATH = "kv/loopcloser/registry-pull";
 
 function onPath(bin: string): boolean {
   try {
@@ -108,7 +110,11 @@ test("the rendered ExternalSecret maps every API key name the service config req
 test("the ExternalSecret reads only kv/loopcloser/api through the estate OpenBao ClusterSecretStore", () => {
   const objs = render();
   const externalSecrets = objs.filter((o) => o["kind"] === "ExternalSecret");
-  assert.equal(externalSecrets.length, 1, "the API keys are the package's only synced secret");
+  assert.deepEqual(
+    externalSecrets.map((o) => o["spec"]?.["target"]?.["name"]).sort(),
+    [SECRET, PULL_SECRET].sort(),
+    "the API keys and the registry pull credential are the package's only synced secrets",
+  );
   const es = apiKeysExternalSecret(objs);
   const spec = es["spec"] as Obj;
 
@@ -120,4 +126,62 @@ test("the ExternalSecret reads only kv/loopcloser/api through the estate OpenBao
   assert.deepEqual(Object.keys(source), ["extract"], "an extract of one path; no find, generator or rewrite");
   assert.equal(source["extract"]["key"], OPENBAO_PATH);
   assert.equal(source["sourceRef"], undefined, "no per-source store override");
+});
+
+// LC-D1b-PULL acceptance: loop-closer's own pull-only registry credential
+// (policy registry-credential-per-product v2), custodied in OpenBao under the
+// loop-closer product path, is synced into a kubernetes.io/dockerconfigjson
+// Secret that the loopcloser Pods name in imagePullSecrets. The manifest
+// carries only OpenBao references, never a literal registry, user or token.
+const PULL_TEMPLATE =
+  '{{ dict "auths" (dict .registry (dict "username" .username "password" .password ' +
+  '"auth" (printf "%s:%s" .username .password | b64enc))) | toJson }}';
+
+function pullExternalSecret(objs: Obj[]): Obj {
+  const found = objs.filter((o) => o["kind"] === "ExternalSecret" && o["spec"]?.["target"]?.["name"] === PULL_SECRET);
+  assert.equal(found.length, 1, `expected exactly one ExternalSecret targeting ${PULL_SECRET}`);
+  return found[0]!;
+}
+
+test("the registry pull ExternalSecret renders a dockerconfigjson secret from the loop-closer OpenBao pull path and no literal credential", () => {
+  const es = pullExternalSecret(render());
+  const spec = es["spec"] as Obj;
+
+  assert.equal(es["metadata"]["name"], PULL_SECRET);
+  assert.deepEqual(spec["secretStoreRef"], STORE);
+  assert.equal(spec["dataFrom"], undefined, "reads named properties only, no bulk extract");
+
+  // Each templated value comes from one property of the loop-closer pull path.
+  const data = spec["data"] as Obj[];
+  assert.deepEqual(
+    data.map((d) => [d["secretKey"], d["remoteRef"]?.["key"], d["remoteRef"]?.["property"]]),
+    [
+      ["registry", PULL_OPENBAO_PATH, "registry"],
+      ["username", PULL_OPENBAO_PATH, "username"],
+      ["password", PULL_OPENBAO_PATH, "password"],
+    ],
+  );
+  for (const d of data) {
+    assert.equal(d["sourceRef"], undefined, "no per-entry store override");
+    assert.match(d["remoteRef"]["key"], /^kv\/loopcloser\//, "under the loop-closer product path");
+    assert.doesNotMatch(d["remoteRef"]["key"], /passband|shared|estate/, "never a shared or other product's path");
+  }
+
+  // The target is a dockerconfigjson Secret owned by the ExternalSecret, whose
+  // only key is built from those properties.
+  const target = spec["target"] as Obj;
+  assert.equal(target["creationPolicy"] ?? "Owner", "Owner");
+  const template = target["template"] as Obj;
+  assert.equal(template["type"], "kubernetes.io/dockerconfigjson");
+  assert.equal(template["engineVersion"] ?? "v2", "v2");
+  assert.deepEqual(Object.keys(template["data"]), [".dockerconfigjson"]);
+  assert.equal(template["data"][".dockerconfigjson"], PULL_TEMPLATE);
+
+  // No literal credential anywhere in the resource: every value the template
+  // emits is an OpenBao property reference, and nothing looks like a token.
+  const text = JSON.stringify(es);
+  assert.doesNotMatch(text, /"auths"\s*:\s*\{\s*"[^"{]/, "no literal registry host in auths");
+  assert.doesNotMatch(text, /ghp_|gho_|github_pat_|glpat-|[A-Za-z0-9+/]{40,}={0,2}/, "no token-shaped literal");
+  const refs = [...PULL_TEMPLATE.matchAll(/\.(\w+)/g)].map((m) => m[1]);
+  for (const r of refs) assert.ok(["registry", "username", "password"].includes(r!), `template reads .${r}`);
 });
