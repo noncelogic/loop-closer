@@ -3,12 +3,15 @@
 # loopcloser:sha-<commit> image, and the schema Job that applies
 # db/migrations before the API serves. Argo CD sync order, by
 # argocd.argoproj.io/sync-wave:
-#   0  Namespace, ExternalSecrets (API keys, registry pull), Service, CronJob
+#   0  Namespace, ExternalSecrets (API keys, registry pull), Service
 #   1  CNPG Cluster loopcloser-db (publishes loopcloser-db-app/uri)
 #   2  Job loopcloser-schema: Sync hook, `node dist/migrate.js`
-#   3  Deployment loopcloser (the API)
-# The tick CronJob stays suspended (deploy/base/tick-cronjob.yaml).
-# Checked by tests/deploy/overlay.test.ts.
+#   3  Deployment loopcloser (the API); CronJob loopcloser-tick
+# The tick CronJob, shipped suspended in deploy/base/tick-cronjob.yaml, runs
+# here (LC-EST-TICK): unsuspended, every minute, on the pinned image below, so
+# armed Whens fire on the estate. It syncs after the schema Job so its first
+# run claims due Whens from a migrated database.
+# Checked by tests/deploy/overlay.test.ts and tests/deploy/aks-obs-01-overlay.test.ts.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -44,6 +47,19 @@ patches:
         path: /metadata/annotations
         value:
           argocd.argoproj.io/sync-wave: "3"
+  - target:
+      group: batch
+      version: v1
+      kind: CronJob
+      name: loopcloser-tick
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          argocd.argoproj.io/sync-wave: "3"
+      - op: replace
+        path: /spec/suspend
+        value: false
 
 # One image for the API, the schema Job and the tick CronJob: the
 # `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>` that

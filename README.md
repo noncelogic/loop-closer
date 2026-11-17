@@ -53,10 +53,11 @@ directory (default `db/migrations` under the app root). `tests/schema/migrate.te
 `<estate registry>/loopcloser:sha-<commit>` to the registry aks-obs-01 pulls from, with a push
 credential read from OpenBao via GitHub OIDC (never a GitHub secret). `deploy/base/` holds the kustomize
 package for aks-obs-01 (namespace `loop-closer`, CNPG cluster `loopcloser-db`, API
-Deployment/Service, suspended per-minute tick CronJob, OpenBao ExternalSecrets), and
+Deployment/Service, per-minute tick CronJob shipped suspended, OpenBao ExternalSecrets), and
 `deploy/overlays/aks-obs-01/` is what the estate's Argo CD syncs: it pins every loopcloser
 container to one `<estate registry>/loopcloser:sha-<commit>` image and adds the schema Job
-(`node dist/migrate.js`), a Sync hook ordered after the CNPG cluster and before the API. Nothing in
+(`node dist/migrate.js`), a Sync hook ordered after the CNPG cluster and before the API, and
+unsuspends the tick CronJob so armed Whens fire on the estate. Nothing in
 this repo applies it to a cluster; rollout is estate-side GitOps. There is no public ingress.
 `tests/deploy/manifests.test.ts` renders it with `kustomize` (or `kubectl kustomize`),
 dry-runs it with `kubectl` and schema-validates it with `kubeconform` against pinned

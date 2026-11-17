@@ -2,8 +2,8 @@
 // estate's Argo CD syncs, pins the API Deployment and the schema Job to one
 // estate-registry loopcloser:sha-<commit> image. The Job runs the migrate
 // entrypoint with DATABASE_URL from loopcloser-db-app/uri as an Argo CD
-// Sync-phase hook, in a wave after the CNPG cluster and before the API, and
-// every CronJob stays suspended.
+// Sync-phase hook, in a wave after the CNPG cluster and before the API. The
+// tick CronJob, unsuspended here, is checked by aks-obs-01-overlay.test.ts.
 //
 // Renders with a real kustomize and validates with the offline schema check
 // (tests/deploy/manifest-check.ts). Nothing here talks to a cluster, a
@@ -155,7 +155,7 @@ function derivedJobSchema(): Obj {
   };
 }
 
-test("the rendered aks-obs-01 overlay passes the offline schema check including the Job and keeps every CronJob suspended", () => {
+test("the rendered aks-obs-01 overlay passes the offline schema check including the Job and the tick CronJob", () => {
   const k8s = join(SCHEMA_DIR, "kubernetes", "v1.34.1-standalone-strict");
   assert.deepEqual(JSON.parse(readFileSync(join(k8s, "job-batch-v1.json"), "utf8")), derivedJobSchema(), "job-batch-v1.json is the derived schema");
 
@@ -172,7 +172,5 @@ test("the rendered aks-obs-01 overlay passes the offline schema check including 
   const badJob = stringify({ ...job, spec: { ...job["spec"], backoffLimit: "three" } });
   assert.throws(() => validate(badJob), /backoffLimit/);
 
-  const cronJobs = objs.filter((o) => o["kind"] === "CronJob");
-  assert.ok(cronJobs.length >= 1, "the overlay keeps the tick CronJob");
-  for (const c of cronJobs) assert.equal(c["spec"]["suspend"], true, `CronJob/${c["metadata"]["name"]} stays suspended`);
+  assert.ok(validated.includes("batch/v1 CronJob loopcloser-tick"), "the tick CronJob is schema-validated");
 });
