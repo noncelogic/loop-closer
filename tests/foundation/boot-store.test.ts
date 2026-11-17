@@ -122,7 +122,9 @@ test("the API exits non-zero when DATABASE_URL is unset and test mode is not sel
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d));
   child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d));
-  const [code] = (await once(child, "exit")) as [number | null];
+  // `close` follows the end of stdout/stderr, so both buffers are complete
+  // before they are asserted on; `exit` can fire with output still in flight.
+  const [code] = (await once(child, "close")) as [number | null];
   assert.notEqual(code, null, "the API must exit on its own, not be killed");
   assert.notEqual(code, 0, "an API without DATABASE_URL must not start");
   assert.match(stderr, /DATABASE_URL/);
