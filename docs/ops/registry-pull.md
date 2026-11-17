@@ -49,19 +49,31 @@ is ignored, and a missing one leaves the Secret unsynced.
 
 Run from the ops jump box, logged in as the delegated ops AppRole. The token is
 never echoed, never passed as a command-line argument (which would land in
-shell history and the process table) and never written to a file:
+shell history and the process table) and never written to a file. The block
+runs in a subshell so a failure aborts it without closing the operator's shell
+and the AppRole token does not outlive it:
 
 ```sh
-# Log in as the delegated ops AppRole (policy decisions-expire-with-default).
-# BAO_ROLE_ID / BAO_SECRET_ID come from the delegated.openbao custody, not this repo.
-export BAO_TOKEN="$(bao write -field=token auth/approle/login \
-  role_id="$BAO_ROLE_ID" secret_id="$BAO_SECRET_ID")"
+(
+  # Log in as the delegated ops AppRole (policy decisions-expire-with-default).
+  # BAO_ROLE_ID / BAO_SECRET_ID come from the delegated.openbao custody, not this repo.
+  # Assign first, export after: `export VAR="$(...)"` masks a failed login and
+  # would let bao fall back to the CLI's cached token-helper credential.
+  BAO_TOKEN="$(bao write -field=token auth/approle/login \
+    role_id="$BAO_ROLE_ID" secret_id="$BAO_SECRET_ID")" \
+    || { echo 'AppRole login failed; nothing written' >&2; exit 1; }
+  [ -n "$BAO_TOKEN" ] \
+    || { echo 'AppRole login returned no token; nothing written' >&2; exit 1; }
+  export BAO_TOKEN
 
-# Read the read:packages token without echo, then write it from stdin.
-read -rs GHCR_PULL_TOKEN
-printf '%s' "$GHCR_PULL_TOKEN" | bao kv put -mount=kv loopcloser/registry-pull \
-  registry=ghcr.io username=<github-user> password=-
-unset GHCR_PULL_TOKEN
+  # GitHub account that owns the pull-only token.
+  GHCR_PULL_USER='<github-user>'
+
+  # Read the read:packages token without echo, then write it from stdin.
+  read -rs GHCR_PULL_TOKEN
+  printf '%s' "$GHCR_PULL_TOKEN" | bao kv put -mount=kv loopcloser/registry-pull \
+    registry=ghcr.io username="$GHCR_PULL_USER" password=-
+)
 ```
 
 `password=-` makes `bao` read that property from stdin.

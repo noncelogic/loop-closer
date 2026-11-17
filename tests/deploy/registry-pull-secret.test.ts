@@ -6,8 +6,9 @@
 // cluster, and no Secret is read.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, parseAllDocuments } from "yaml";
 
@@ -79,4 +80,54 @@ test("the ops runbook's registry pull credential path and properties match the l
   assert.match(rb.text, /read:packages/, "the credential is pull-only (read:packages)");
   assert.match(rb.text, /password=-/, "the password is read from stdin, never passed as an argument");
   assert.doesNotMatch(rb.text, /ghp_|gho_|github_pat_|[A-Za-z0-9+/]{40,}={0,2}/, "no token-shaped literal");
+});
+
+// The runbook's write block, run under bash against a stub `bao` that logs
+// each call (with the BAO_TOKEN it saw) instead of reaching OpenBao. A failed
+// or empty AppRole login must abort before any write, so the CLI can never
+// fall back to a cached token-helper credential.
+function writeBlock(): string {
+  const blocks = [...section(readFileSync(RUNBOOK, "utf8"), "Writing the credential").matchAll(/^```sh\n([\s\S]*?)^```/gm)];
+  assert.equal(blocks.length, 1, "the runbook has exactly one write block");
+  return blocks[0]![1]!;
+}
+
+function runWriteBlock(login: string): { status: number | null; calls: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), "registry-pull-runbook-"));
+  try {
+    const log = join(dir, "calls.log");
+    const stub = join(dir, "bao");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+printf '%s token=%s\\n' "$*" "\${BAO_TOKEN-}" >> "${log}"
+if [ "$1" = write ]; then ${login}; fi
+cat > /dev/null
+`,
+    );
+    chmodSync(stub, 0o755);
+    writeFileSync(log, "");
+    const r = spawnSync("bash", ["-c", writeBlock()], {
+      input: "stub-pull-token\n",
+      encoding: "utf8",
+      env: { PATH: `${dir}:${process.env["PATH"]}`, BAO_ROLE_ID: "role", BAO_SECRET_ID: "secret" },
+    });
+    return { status: r.status, calls: readFileSync(log, "utf8").split("\n").filter(Boolean) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the runbook write block aborts before writing when the AppRole login fails or returns no token", () => {
+  for (const login of ["exit 1", "exit 0", "printf ''"]) {
+    const r = runWriteBlock(login);
+    assert.notEqual(r.status, 0, `login \`${login}\` makes the block fail`);
+    assert.equal(r.calls.filter((c) => c.startsWith("kv ")).length, 0, `login \`${login}\` writes nothing`);
+  }
+
+  const ok = runWriteBlock("printf 'approle-token'");
+  assert.equal(ok.status, 0);
+  const puts = ok.calls.filter((c) => c.startsWith("kv put "));
+  assert.equal(puts.length, 1, "a successful login writes once");
+  assert.match(puts[0]!, /password=- token=approle-token$/, "the write uses the AppRole login token");
 });
