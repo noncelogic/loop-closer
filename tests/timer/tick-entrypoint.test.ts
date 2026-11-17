@@ -6,27 +6,46 @@
 // Requires Docker with the Compose plugin (tests/schema/replica.ts).
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseAllDocuments } from "yaml";
 import { Replica, repoRoot } from "../schema/replica.ts";
+import { buildEntrypoints, manifestScriptIn, type EntrypointBuild } from "../support/entrypoint-build.ts";
 import { PgTimerStore } from "../../src/timer/pg-store.ts";
 import { DuplicateIdempotencyKeyError } from "../../src/timer/store.ts";
 
 const db = new Replica("tick-entrypoint");
 
+// A private build output, not the shared `dist/` (tests/support/entrypoint-build.ts).
+let build: EntrypointBuild | undefined;
+
 before(
-  () => {
-    execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "inherit" });
+  async () => {
+    build = await buildEntrypoints("tick-entrypoint");
     db.up();
     db.migrate();
   },
   { timeout: 300_000 },
 );
-after(() => db.down(), { timeout: 120_000 });
+after(
+  () => {
+    try {
+      db.down();
+    } finally {
+      build?.remove();
+    }
+  },
+  { timeout: 120_000 },
+);
+
+/** The manifest's script, resolved inside this file's private build. */
+function builtScript(script: string): string {
+  assert.ok(build, "the entrypoint build must have completed");
+  return manifestScriptIn(build, script);
+}
 
 /** The container command of deploy/base/tick-cronjob.yaml. */
 function cronJobCommand(): string[] {
@@ -48,14 +67,15 @@ const FROZEN_CLOCK = pathToFileURL(join(repoRoot, "tests", "timer", "fixtures", 
  * (e.g. a TCP server) keep serving while the child runs.
  */
 async function runEntrypoint(databaseUrl: string | undefined): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const [cmd, ...args] = cronJobCommand();
+  const [cmd, script, ...args] = cronJobCommand();
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env["DATABASE_URL"];
   if (databaseUrl !== undefined) env["DATABASE_URL"] = databaseUrl;
   env["FROZEN_NOW"] = FROZEN_NOW;
   env["NODE_OPTIONS"] = `${env["NODE_OPTIONS"] ?? ""} --import=${FROZEN_CLOCK}`.trim();
-  // The image's WORKDIR is the app root, where dist/ sits.
-  const child = spawn(cmd!, args, { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
+  // The image's WORKDIR is the app root, where dist/ sits; the private build
+  // sits beside it, so the child resolves contracts/ and node_modules the same way.
+  const child = spawn(cmd!, [builtScript(script!), ...args], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d));
@@ -73,7 +93,7 @@ test("the command in deploy/base/tick-cronjob.yaml names a file the build emits"
   const script = command[1];
   assert.ok(script, "the command must name a script");
   assert.match(script, /^dist\//, "the script must be build output (tsconfig.build.json outDir)");
-  assert.ok(existsSync(join(repoRoot, script)), `npm run build must emit ${script}`);
+  assert.ok(existsSync(builtScript(script)), `npm run build must emit ${script}`);
 });
 
 test("one entrypoint run fires a due calendar When once in the ledger and exits zero", { timeout: 120_000 }, async () => {
