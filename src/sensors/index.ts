@@ -41,3 +41,8 @@ export {
   type PublicListingConfig,
   type PublicListingReaderOptions,
 } from "./public-listing.ts";
+export {
+  PortalReadFailedError,
+  runPortalRead,
+  type PortalReadRunOptions,
+} from "./portal-run.ts";
