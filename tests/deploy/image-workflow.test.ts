@@ -122,3 +122,64 @@ test("every estate image job asks only for labels the passband-ci runner carries
     assert.ok(labels.includes("passband-ci"), `job ${name} targets the passband-ci scale set by name`);
   }
 });
+
+// LC-D1b-PUSH: the ops runbook names (never the values of) every repository
+// variable the workflow reads and the OpenBao KV fields it pulls, so the
+// estate side provisions exactly what the workflow expects. The runbook's
+// "Repository variables" table must match the workflow's `vars.*` set exactly.
+const RUNBOOK = join(repoRoot, "docs", "ops", "estate-image.md");
+
+function workflowVars(text: string): Set<string> {
+  return new Set([...text.matchAll(/\bvars\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!));
+}
+
+function runbookSection(doc: string, heading: string): string {
+  const start = doc.indexOf(`\n## ${heading}\n`);
+  assert.ok(start >= 0, `docs/ops/estate-image.md has a "## ${heading}" section`);
+  const rest = doc.slice(start + heading.length + 5);
+  const end = rest.search(/\n## /);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+test("every repository variable and OpenBao path the estate-image workflow reads is named in docs/ops/estate-image.md", () => {
+  const { text, wf } = load();
+  const doc = readFileSync(RUNBOOK, "utf8");
+
+  const read = workflowVars(text);
+  assert.ok(read.size > 0, "the workflow reads repository variables");
+
+  // Table rows of the "Repository variables" section: | `NAME` | ... |
+  const table = runbookSection(doc, "Repository variables");
+  const documented = new Set(
+    [...table.matchAll(/^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|/gm)].map((m) => m[1]!),
+  );
+  assert.deepEqual(
+    [...documented].sort(),
+    [...read].sort(),
+    "the runbook's repository-variable table names exactly the variables the workflow reads",
+  );
+
+  // OpenBao: the KV path and JWT role the workflow logs in with, and every
+  // field it reads at that path, are named in the OpenBao section.
+  const job = Object.values(wf["jobs"] as Obj).find((j) =>
+    steps(j as Obj).some((s) => String(s["uses"] ?? "").startsWith("hashicorp/vault-action@")),
+  ) as Obj;
+  const bao = steps(job).find((s) => String(s["uses"] ?? "").startsWith("hashicorp/vault-action@"))!["with"] as Obj;
+  const openbao = runbookSection(doc, "OpenBao");
+  const pathVar = /vars\.([A-Za-z0-9_]+)/.exec(String(bao["secrets"]))![1]!;
+  const roleVar = /vars\.([A-Za-z0-9_]+)/.exec(String(bao["role"]))![1]!;
+  const addrVar = /vars\.([A-Za-z0-9_]+)/.exec(String(bao["url"]))![1]!;
+  for (const name of [pathVar, roleVar, addrVar]) {
+    assert.ok(openbao.includes(`\`${name}\``), `the OpenBao section names \`${name}\``);
+  }
+  assert.ok(/\bjwt\b/i.test(openbao), "the OpenBao section names the JWT auth method");
+  const fields = [...String(bao["secrets"]).matchAll(/\}\}\s+([A-Za-z0-9_]+)\s*\|/g)].map((m) => m[1]!);
+  assert.ok(fields.length > 0, "the workflow reads fields at the OpenBao path");
+  for (const f of fields) {
+    assert.ok(openbao.includes(`\`${f}\``), `the OpenBao section names the KV field \`${f}\``);
+  }
+
+  // The published tag the workflow pushes is the one the runbook promises.
+  assert.ok(doc.includes("loopcloser:sha-<commit>"), "the runbook names the published tag loopcloser:sha-<commit>");
+  assert.ok(doc.includes(".github/workflows/estate-image.yml"), "the runbook points at the workflow it describes");
+});
