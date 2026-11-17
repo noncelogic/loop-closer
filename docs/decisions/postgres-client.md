@@ -73,6 +73,26 @@ because it is already the dependency on main and the timer stores use it, so
 adopting a second driver would add a dependency for no gain. ORMs and query
 builders are out: they add a second schema model next to the migrations.
 
+## Meeting the kernel's GraphTx
+
+`pg` is asynchronous only: every query returns a Promise, and Node has no
+maintained synchronous Postgres driver that keeps a pool and the error
+fields above. The kernel therefore reaches Postgres through an async seam
+rather than a sync driver: every `GraphTx` method in `src/kernel/store.ts`
+returns a Promise, and `GraphStore.transaction`/`read` take a callback that
+may be async (the seam LC-RUN-GRAPHTX-ASYNC called for; on main, with
+`InMemoryGraphStore` and `PgGraphStore` both implementing it). No sync
+wrapper (worker thread plus `Atomics.wait`, or a child process) is used.
+
+## Tests
+
+Tests reach a real local Postgres container (the Compose replica in
+`compose.yaml`, never PGlite or SQLite) through the same client.
+`tests/kernel/pg-harness.ts` opens a fresh database on an isolated replica
+and applies the migrations through a chosen version with `pg`, as the owner
+role; `appPool()` gives a pool acting as `loopcloser_app`. Only the
+replica's local development credentials are used.
+
 ## Consequences
 
 - `timestamptz` columns come back as `Date` and are returned as ISO 8601 UTC
