@@ -25,8 +25,12 @@ on:
 permissions:
   contents: read
 
+# Group estate-image-hosted-v1, not the old `estate-image`: run 44147944903
+# still holds that group, queued for the retired passband-ci label, and every
+# hosted run waiting behind it was cancelled. Pushes stay serialised and a run
+# in progress is never cancelled.
 concurrency:
-  group: estate-image
+  group: estate-image-hosted-v1
   cancel-in-progress: false
 
 jobs:
@@ -61,7 +65,8 @@ jobs:
           registry: ${{ vars.ESTATE_REGISTRY }}
           username: ${{ secrets.ESTATE_REGISTRY_USERNAME }}
           password: ${{ secrets.ESTATE_REGISTRY_PASSWORD }}
-      - uses: docker/build-push-action@v6
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -69,3 +74,25 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      # The digest the registry returned for this push, with its source
+      # commit and run, so the overlay can pin exactly this image by digest
+      # once a pull of it on aks-obs-01 is verified (LC-EST-IMAGE-READY,
+      # deploy/overlays/aks-obs-01/image-evidence.json). Nothing secret.
+      - name: Record pushed digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ vars.ESTATE_REGISTRY }}/loopcloser
+        run: |
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::build-push returned no sha256 digest"; exit 1 ;;
+          esac
+          {
+            echo "## Pushed loopcloser image"
+            echo
+            echo "- image: \`$IMAGE@$DIGEST\`"
+            echo "- digest: \`$DIGEST\`"
+            echo "- source commit: \`$GITHUB_SHA\`"
+            echo "- run: \`$GITHUB_RUN_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "pushed $IMAGE@$DIGEST from $GITHUB_SHA (run $GITHUB_RUN_ID)"

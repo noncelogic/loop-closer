@@ -9,8 +9,11 @@ touches a cluster: rollout is estate-side GitOps, pinning a `sha-<commit>` tag.
 
 It used to target the estate's `passband-ci` self-hosted runners, but those
 are registered only for `noncelogic/loopmentum`, so no run ever started
-(LC-ESTATE-IMAGE-RUNNER). The `estate-image` concurrency group still
-serialises pushes, without cancelling a run in progress.
+(LC-ESTATE-IMAGE-RUNNER). The `estate-image-hosted-v1` concurrency group
+serialises pushes, without cancelling a run in progress. It replaces the old
+`estate-image` group, which run 44147944903 (queued for the retired
+`passband-ci` label) still holds: every hosted run that waited in that group
+was cancelled behind it, so nothing was published.
 
 The registry push credential is per product (policy
 `registry-credential-per-product`). The job reads it from the repository
@@ -64,3 +67,38 @@ build and smoke check.
 3. If the registry login or push fails, the secrets do not hold a credential
    that can push `loopcloser` to `ESTATE_REGISTRY`.
 4. Check that the registry has `loopcloser:sha-<commit>` for the merged commit.
+5. Read the pushed digest, source commit and run id from the publish job's
+   *Record pushed digest* step (job summary *Pushed loopcloser image*).
+
+## Promoting a verified digest
+
+`deploy/overlays/aks-obs-01` pins the image by digest only after that digest
+has been pulled on aks-obs-01 (LC-EST-IMAGE-READY, rule
+`policies/placement-defaults.yaml#estate`):
+
+1. Take the digest from a successful publish run (above). Never type one in.
+2. Through the DevOps route, pull `<ESTATE_REGISTRY>/loopcloser@<digest>` on
+   aks-obs-01 in namespace `loop-closer` with the `loopcloser-registry-pull`
+   Secret synced from `kv/loopcloser/registry-pull`.
+3. In one change, add `deploy/overlays/aks-obs-01/image-evidence.json` and
+   replace the overlay's `newTag` with `digest: <digest>`. The record holds no
+   credential value:
+
+   ```json
+   {
+     "image": "<ESTATE_REGISTRY>/loopcloser",
+     "digest": "sha256:<pushed digest>",
+     "publish": { "workflow": "estate-image", "job": "publish", "run": <run id>, "sourceCommit": "<40-hex commit>" },
+     "pull": {
+       "cluster": "aks-obs-01", "namespace": "loop-closer",
+       "credential": "kv/loopcloser/registry-pull", "pullSecret": "loopcloser-registry-pull",
+       "route": "DevOps", "digest": "sha256:<pulled digest>",
+       "verifiedAt": "<ISO 8601 time>", "evidence": "<where the pull's nonsecret log is kept>"
+     }
+   }
+   ```
+
+`tests/deploy/aks-obs-01-overlay.test.ts` ("the overlay pins the loopcloser
+image by the digest the publish workflow pushed") checks the record and the
+overlay; it is reported as todo until the record exists, and a digest pinned
+without it fails.
