@@ -1,7 +1,10 @@
 name: ci
 
 # Plain `pull_request` only — never `pull_request_target` (docs/EXTERNAL-REVIEW.md §1).
-# Runs on GitHub-hosted runners, not the estate's self-hosted ones.
+# Every job runs on the estate's self-hosted ARC org scale set noncelogic-org
+# (runs-on [self-hosted, aks]), never a GitHub-hosted runner (LC-EST-PUBLISH-RUNNER;
+# Rule: policies/placement-defaults.yaml#estate). The runner image has no node:
+# a job that runs node installs it with actions/setup-node first.
 on:
   push:
     branches: [main]
@@ -16,7 +19,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 15
     env:
       KUBECTL_VERSION: v1.34.1
@@ -48,7 +51,7 @@ jobs:
   # the runner image ships. Touches no cluster and reads no secret: no kubeconfig, no
   # cluster credentials, and the token stays read-only.
   manifests:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 10
     env:
       KUBECTL_VERSION: v1.34.1
@@ -71,7 +74,7 @@ jobs:
   # main. Never touches a cluster: rollout of deploy/ is estate-side GitOps.
   image:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -102,14 +105,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   # The pull-request dry run of .github/workflows/estate-image.yml (policy
-  # main-stays-green). The publish can only act on main; this job builds the same context and Dockerfile on a
-  # GitHub-hosted runner, tags it like the publish without a registry, pushes
+  # main-stays-green). The publish can only act on main; this job builds the same context and Dockerfile on the
+  # org scale set, tags it like the publish without a registry, pushes
   # nothing, and runs the listings-read CronJob's command in the built image
   # (deploy/overlays/aks-obs-01/listings-read.yaml), so a merge cannot publish
   # an image that lacks the portal-read entrypoint. Reads no secret and no
   # estate configuration. Checked by test/deploy/estate-image.test.ts.
   estate-image-dry-run:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -138,7 +141,7 @@ jobs:
   # credential, and no repository secret. Fails naming the
   # missing input. Checked by tests/ci/estate-image-workflow.test.ts.
   estate-image-inputs:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 5
     permissions:
       contents: read
@@ -147,6 +150,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Check the estate registry variable and OpenBao push credential are reachable
         env:
           ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}

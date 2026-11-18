@@ -4,7 +4,7 @@
 // (deploy/overlays/aks-obs-01/listings-read.yaml). The publish itself can only
 // act on main, so ci.yml carries its
 // pull-request dry run (policy main-stays-green): job `estate-image-dry-run`
-// builds the same context and Dockerfile on a GitHub-hosted runner, pushes
+// builds the same context and Dockerfile on the ARC org scale set, pushes
 // nothing, and runs the CronJob's command in the built image through
 // .github/scripts/estate-image-smoke.sh.
 //
@@ -64,7 +64,7 @@ test("the estate image built by the publish dry run starts the portal-read entry
   const command = listingsReadCommand();
   assert.deepEqual(command, ["node", "dist/portal-read.js"], "the CronJob runs the portal-read entrypoint");
 
-  // The dry run: a pull-request job, on a GitHub-hosted runner, that builds
+  // The dry run: a pull-request job, on the ARC org scale set, that builds
   // exactly what the main publish builds and pushes nothing.
   const ci = parse(readFileSync(CI, "utf8")) as Obj;
   assert.ok("pull_request" in (ci["on"] as Obj), "ci.yml runs on pull requests");
@@ -72,7 +72,7 @@ test("the estate image built by the publish dry run starts the portal-read entry
   const job = (ci["jobs"] as Obj)[DRY_RUN_JOB] as Obj | undefined;
   assert.ok(job, `ci.yml has the ${DRY_RUN_JOB} job`);
   assert.equal(job["if"], undefined, "the dry run runs on every event, pull requests included");
-  assert.equal(job["runs-on"], "ubuntu-latest", "the dry run runs on a GitHub-hosted runner");
+  assert.deepEqual(job["runs-on"], ["self-hosted", "aks"], "the dry run runs on the ARC org scale set, like the publish");
   assert.deepEqual(job["permissions"], { contents: "read" }, "the dry run can read the repo and nothing else");
   const text = JSON.stringify(job);
   assert.ok(!/secrets\.|github\.token|vars\./.test(text), "the dry run reads no secret and no estate configuration");

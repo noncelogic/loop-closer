@@ -9,9 +9,13 @@ name: estate-image
 # (docs/EXTERNAL-REVIEW.md §1). The pull-request dry runs are ci.yml's
 # `estate-image-dry-run` (build) and `estate-image-inputs` (registry inputs).
 #
-# Runner: GitHub-hosted, as ci.yml is (LC-ESTATE-IMAGE-RUNNER). The estate's
-# passband-ci runners are registered only for noncelogic/loopmentum, so runs
-# that asked for them never started.
+# Runner: the self-hosted ARC org scale set noncelogic-org (runs-on
+# [self-hosted, aks]), as every ci.yml job is (LC-EST-PUBLISH-RUNNER; Rule:
+# policies/placement-defaults.yaml#estate, no GitHub-hosted runners). A
+# GitHub-hosted runner cannot reach the estate OpenBao, so the login below
+# could not read the push credential there. The scale set serves every private
+# noncelogic repo; the passband-ci set is registered only for
+# noncelogic/loopmentum. Its runner image has no node, so the job sets it up.
 #
 # Registry login (LC-EST-IMAGE-PUBLISH): loop-closer's own least-privilege push
 # credential, custodied in OpenBao at kv/loop-closer/registry-push (Rule:
@@ -40,7 +44,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aks]
     timeout-minutes: 20
     # id-token: write lets the job mint the OIDC token OpenBao's JWT auth
     # accepts for role loop-closer-registry-push (bound to main).
@@ -51,6 +55,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: docker/setup-buildx-action@v3
       - name: Log in to the estate registry with the OpenBao push credential
         env:
