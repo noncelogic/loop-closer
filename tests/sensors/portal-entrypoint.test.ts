@@ -5,8 +5,9 @@
 // non-zero without a heartbeat, so a stale sensor stays distinct from a quiet
 // world.
 //
-// The read is injected through the reader's configuration: the listing's
-// public page is served by a stub directory this test owns.
+// The listing is tracked through intake: its When's source binding names the
+// listing's public page (LC-SENSE-LISTING-BINDINGS), served by a stub directory
+// this test owns. The entrypoint takes no listing URL from its environment.
 //
 // Requires Docker with the Compose plugin (tests/schema/replica.ts).
 import { after, before, test } from "node:test";
@@ -18,7 +19,7 @@ import pg from "pg";
 import { Replica, repoRoot } from "../schema/replica.ts";
 import { buildEntrypoints, type EntrypointBuild } from "../support/entrypoint-build.ts";
 import { Kernel, PgGraphStore, type Node } from "../../src/kernel/index.ts";
-import { ANTHROPIC_LISTINGS_SENSOR, LISTING_STATUS_CHANGED, PUBLIC_LISTING_ENV } from "../../src/sensors/index.ts";
+import { ANTHROPIC_LISTINGS_SENSOR, LISTING_STATUS_CHANGED } from "../../src/sensors/index.ts";
 
 const ENTRYPOINT = "portal-read.js";
 
@@ -36,7 +37,6 @@ const directory = http.createServer((_req, res) => {
   res.writeHead(pageStatus, { "content-type": "text/html" });
   res.end(pageStatus === 200 ? "<html><head><title>Rove connector</title></head></html>" : "");
 });
-let pagesEnv = "";
 
 before(
   async () => {
@@ -48,8 +48,7 @@ before(
       directory.listen(0, "127.0.0.1", resolve);
     });
     const { port } = directory.address() as { port: number };
-    pagesEnv = JSON.stringify({ [SUBJECT]: `http://127.0.0.1:${port}/listings/${SUBJECT}` });
-    await bindListingWhen();
+    await bindListingWhen(`http://127.0.0.1:${port}/listings/${SUBJECT}`);
   },
   { timeout: 300_000 },
 );
@@ -66,7 +65,7 @@ after(
 );
 
 /** A loop waiting on the listing, through a When bound to that one listing. */
-async function bindListingWhen(): Promise<void> {
+async function bindListingWhen(page: string): Promise<void> {
   const pool = new pg.Pool({ connectionString: db.databaseUrl() });
   try {
     const kernel = new Kernel(new PgGraphStore(pool));
@@ -84,7 +83,7 @@ async function bindListingWhen(): Promise<void> {
       attributes: {
         when_type: "event",
         event_type: LISTING_STATUS_CHANGED,
-        source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll", config: { subject: SUBJECT } },
+        source_binding: { source: ANTHROPIC_LISTINGS_SENSOR.source_binding.source, mechanism: "poll", config: { subject: SUBJECT, url: page } },
         fired_at: null,
         fire_count: 0,
       },
@@ -112,7 +111,7 @@ function entrypoint(): string {
 
 /** Runs the built entrypoint asynchronously, so the stub directory keeps serving. */
 async function invoke(): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const env: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: db.databaseUrl(), [PUBLIC_LISTING_ENV.pages]: pagesEnv };
+  const env: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: db.databaseUrl() };
   const child = spawn("node", [entrypoint()], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   let stdout = "";
   let stderr = "";

@@ -7,15 +7,15 @@
 #   1  CNPG Cluster loopcloser-db (publishes loopcloser-db-app/uri)
 #   2  Job loopcloser-schema: Sync hook, `node dist/migrate.js`
 #   3  Deployment loopcloser (the API); CronJobs loopcloser-tick and
-#      loopcloser-listings-read (ConfigMap loopcloser-listings-pages: wave 0)
+#      loopcloser-listings-read
 # The tick CronJob, shipped suspended in deploy/base/tick-cronjob.yaml, runs
 # here (LC-EST-TICK): unsuspended, every minute, on the pinned image below, so
 # armed Whens fire on the estate. It syncs after the schema Job so its first
 # run claims due Whens from a migrated database.
 # The listings-read CronJob (listings-read.yaml, LC-EST-PORTAL-CRON) ships
-# suspended here, with no credential and an empty tracked-listings ConfigMap
-# (no listing URL is recorded in SPEC.md under CLOSER-205's answer,
-# LC-EST-PORTAL-URLS, yet; no fixture URL).
+# suspended here, with no credential and no listing URL: its targets are the
+# listing bindings in the graph (LC-SENSE-LISTING-BINDINGS), so it mounts no
+# listing-URL ConfigMap.
 # Checked by tests/deploy/overlay.test.ts, tests/deploy/aks-obs-01-overlay.test.ts
 # and test/deploy/aks-obs-01-listings-read.test.ts.
 apiVersion: kustomize.config.k8s.io/v1beta1
