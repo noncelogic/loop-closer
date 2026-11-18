@@ -14,7 +14,8 @@
 # run claims due Whens from a migrated database.
 # The listings-read CronJob (listings-read.yaml, LC-EST-PORTAL-CRON) ships
 # suspended here, with no credential and an empty tracked-listings ConfigMap
-# (no listing URL is recorded in SPEC.md yet; no fixture URL).
+# (no listing URL is recorded in SPEC.md under CLOSER-205's answer,
+# LC-EST-PORTAL-URLS, yet; no fixture URL).
 # Checked by tests/deploy/overlay.test.ts, tests/deploy/aks-obs-01-overlay.test.ts
 # and test/deploy/aks-obs-01-listings-read.test.ts.
 apiVersion: kustomize.config.k8s.io/v1beta1

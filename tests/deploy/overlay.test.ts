@@ -185,8 +185,9 @@ test("the rendered aks-obs-01 overlay passes the offline schema check including 
 // listing page URLs from a ConfigMap. The public listing read needs no
 // credential (CLOSER-122), so the only Secret it references is the graph's
 // DATABASE_URL, and it mounts nothing. No listing URL is recorded yet
-// (SPEC.md names the listings only), so the ConfigMap tracks none
-// (LC-EST-PORTAL-LISTINGS-NOFIX, test/deploy/aks-obs-01-listings-read.test.ts).
+// (SPEC.md names the listings only, with no URL under LC-EST-PORTAL-URLS), so
+// the ConfigMap tracks none (LC-EST-PORTAL-LISTINGS-NOFIX and
+// LC-EST-PORTAL-LISTINGS-URLS, test/deploy/aks-obs-01-listings-read.test.ts).
 test("the listings-read CronJob runs the portal-read entrypoint with listing URLs from its ConfigMap and mounts no credential", () => {
   const objs = render();
   const cron = one(objs, "CronJob", LISTINGS_READ);
@@ -221,12 +222,15 @@ test("the listings-read CronJob runs the portal-read entrypoint with listing URL
   const secretRefs = (c["env"] as Obj[]).flatMap((e) => (e["valueFrom"]?.["secretKeyRef"] ? [e["valueFrom"]["secretKeyRef"]] : []));
   assert.deepEqual(secretRefs, [{ name: DB_SECRET, key: "uri" }], "only the database URI Secret");
 
-  // The ConfigMap holds a configuration the reader parses: no listing is
-  // tracked until SPEC.md records one's URL.
+  // The ConfigMap holds the tracked listings SPEC.md records under
+  // LC-EST-PORTAL-URLS (with source page and read date) and their projection
+  // the reader parses; none is recorded yet, so no listing is tracked.
   const cm = one(objs, "ConfigMap", LISTINGS_PAGES);
   assert.equal(cm["metadata"]["namespace"], NAMESPACE);
+  assert.deepEqual(Object.keys(cm["data"] ?? {}).sort(), [ref["key"] as string, "tracked-listings.json"].sort());
   const raw = cm["data"]?.[ref["key"] as string] as string | undefined;
   assert.ok(raw, `ConfigMap/${LISTINGS_PAGES} carries key ${ref["key"]}`);
+  assert.deepEqual(JSON.parse(cm["data"]["tracked-listings.json"] as string), [], "no tracked listing recorded");
   assert.equal(loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: raw }), undefined, "no listing tracked yet");
 
   // Syncs after the schema Job, like the other database readers.

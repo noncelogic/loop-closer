@@ -5,12 +5,16 @@
 # with the listing page URLs from the tracked-listings ConfigMap below, its
 # only source of listing URLs.
 #
-# The ConfigMap holds exactly the live public page URLs SPEC.md records beside
-# each listing (CLOSER-205's current default) and no fixture URL. SPEC.md names
-# the Rove connector and plugin listings but records no URL for either, so the
-# list is empty and the CronJob ships SUSPENDED (the overlay's pinned image also
-# predates src/portal-read.ts). Activation (CLOSER-215) adds the recorded URLs
-# and sets `suspend: false`; the image rollout is CLOSER-216.
+# The ConfigMap holds exactly the Rove directory-listing URLs SPEC.md records
+# under CLOSER-205's answer (LC-EST-PORTAL-URLS), each with its recorded source
+# page and read date, and no fixture URL. On CLOSER-205's current default a
+# listing is tracked only by its recorded live public page. SPEC.md records no
+# URL for the Rove connector listing (in Anthropic review since 2026-10-17) or
+# the Rove plugin listing (Scanning at filing, 2026-11-06), so the list is
+# empty and the CronJob ships SUSPENDED (the overlay's pinned image also
+# predates src/portal-read.ts). URLs are copied from SPEC.md only, never
+# invented or read from a live page. Activation is CLOSER-215; the image
+# rollout is CLOSER-216.
 #
 # The public read needs no credential (CLOSER-122): nothing is mounted, no
 # ServiceAccount token is automounted, and the only Secret referenced is the
@@ -24,8 +28,13 @@ metadata:
     app.kubernetes.io/name: loopcloser
     app.kubernetes.io/component: listings-read
 data:
-  # LISTINGS_DIRECTORY_PAGES: JSON object, listing → public directory page URL.
-  # Empty: SPEC.md records no listing URL yet.
+  # The tracked listings, as SPEC.md records them under LC-EST-PORTAL-URLS: a
+  # JSON array of {"listing", "url", "source" (the page the URL was recorded
+  # from), "read" (YYYY-MM-DD)}. Empty: SPEC.md records no listing URL yet.
+  tracked-listings.json: |
+    []
+  # LISTINGS_DIRECTORY_PAGES: JSON object, listing → public directory page URL;
+  # exactly tracked-listings.json's listing → url.
   directory-pages.json: |
     {}
 ---
