@@ -16,7 +16,8 @@
 # suspended here, with no credential and no listing URL: its targets are the
 # listing bindings in the graph (LC-SENSE-LISTING-BINDINGS), so it mounts no
 # listing-URL ConfigMap.
-# Checked by tests/deploy/overlay.test.ts, tests/deploy/aks-obs-01-overlay.test.ts
+# Checked by tests/deploy/overlay.test.ts, tests/deploy/aks-obs-01-overlay.test.ts,
+# deploy/test/aks-obs-01-overlay.test.ts (LC-EST-SYNC: schema Job before every workload)
 # and test/deploy/aks-obs-01-listings-read.test.ts.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
