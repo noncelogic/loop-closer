@@ -1,8 +1,14 @@
 // LC-M1-T4 acceptance: manual `transition` plus `fire_event` move a loop's
 // state; `what_fires_next` and `open_loops` answer from the stored graph (SPEC B3).
-import { test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { assertValid, experimentProposal, newKernel, repoRuns, resultsLand } from "./fixtures.ts";
+import { Kernel, PgGraphStore, type Node } from "../../src/kernel/index.ts";
+import { PgTimerStore as UrlTimerStore } from "../../src/timer/pg-store.ts";
+import { PgTimerStore as PoolTimerStore } from "../../src/timer/pg-timer-store.ts";
+import type { TimerStore } from "../../src/timer/store.ts";
+import { runTick } from "../../src/timer/tick.ts";
+import { assertValid, experiment, experimentProposal, newKernel, repoRuns, resultsLand } from "./fixtures.ts";
+import { PgHarness } from "./pg-harness.ts";
 
 const evidence = { kind: "communication", id: "lc_comm_1" } as const;
 
@@ -229,4 +235,139 @@ test("a When without a change condition fires on every matching event", async ()
   const when = await store.read((tx) => tx.getNode(repoRuns.id));
   assert.equal(when?.attributes["fire_count"], 2);
   assert.equal(when?.attributes["change_condition"], undefined);
+});
+
+// LC-CP-SUSPEND: a suspended loop is neither armed nor closed. Its Whens are
+// held -- the tick does not fire its calendar When and fire_event does not fire
+// its event Whens -- until a transition resumes it to open; the resumed loop's
+// next due calendar slot then fires once. Kernel, Postgres graph store and the
+// tick's Postgres timer stores run unfaked against a real Compose replica.
+const harness = new PgHarness("kernel-suspend");
+
+const dailyReview: Node = {
+  id: "lc_when_daily_review",
+  kind: "when",
+  created_at: "2026-11-10T08:00:00Z",
+  status: "active",
+  attributes: {
+    when_type: "calendar",
+    schedule: { rrule: "FREQ=DAILY", dtstart: "2026-11-11T09:00:00Z" },
+    timezone: "UTC",
+    next_fire_at: "2026-11-11T09:00:00Z",
+  },
+};
+
+async function suspendedLoop() {
+  const database = await harness.freshDatabase();
+  let now = Date.parse("2026-11-10T09:00:00Z");
+  let seq = 0;
+  const kernel = new Kernel(new PgGraphStore(database.appPool()), {
+    now: () => new Date(now),
+    newId: (prefix) => `lc_${prefix}_${++seq}`,
+  });
+  const { loop } = await kernel.proposeLoop(
+    experimentProposal({
+      nodes: [...experimentProposal().nodes, dailyReview],
+      edges: [...(experimentProposal().edges ?? []), { from_id: experiment.id, to_id: dailyReview.id, edge_type: "is_waiting_on" }],
+    }),
+  );
+  await kernel.acceptLoop(loop.id, { acceptor: "joe" });
+  const suspended = await kernel.transition(loop.id, {
+    to_state: "suspended",
+    actor: "agent:cortexplane",
+    evidence,
+    idempotency_key: "suspend-1",
+  });
+  // The production tick store (src/tick.ts) and the pooled one, acting as the app role.
+  const urlStore = new UrlTimerStore({ connectionString: database.url });
+    const tickStores: TimerStore[] = [urlStore, new PoolTimerStore(database.appPool())];
+  const tickAt = async (iso: string, store: TimerStore = tickStores[0]!) => {
+    now = Date.parse(iso);
+    return runTick(store, { now: new Date(iso), newId: () => `lc_evt_tick_${++seq}` });
+  };
+  const nodeOf = async (id: string) => (await database.pool.query("SELECT attributes FROM nodes WHERE id = $1", [id])).rows[0]?.attributes;
+  const closeAll = () => urlStore.close();
+  return { kernel, loopId: loop.id, suspended, tickAt, tickStores, nodeOf, closeAll };
+}
+
+describe("suspended loops on Postgres", () => {
+  before(() => harness.up(), { timeout: 300_000 });
+  after(() => harness.down(), { timeout: 120_000 });
+
+  test("a suspended loop's Whens are not fired by the tick or by fire_event", { timeout: 300_000 }, async () => {
+    const { kernel, loopId, suspended, tickAt, tickStores, nodeOf, closeAll } = await suspendedLoop();
+    try {
+      assert.equal(suspended.applied, true);
+      assertValid("loop", suspended.loop);
+      assertValid("ledger-event", suspended.ledger_event);
+      assert.equal(suspended.loop.state, "suspended");
+      assert.deepEqual(suspended.ledger_event.payload, { from_state: "open", to_state: "suspended", evidence });
+
+      // Not closed: open_loops still lists it, as suspended, and it can be filtered on.
+      const listed = (await kernel.openLoops({})).loops.map((l) => [l.loop.id, l.loop.state, l.loop.closed_at]);
+      assert.deepEqual(listed, [[loopId, "suspended", null]]);
+      assert.deepEqual((await kernel.openLoops({ state: "suspended" })).loops.map((l) => l.loop.id), [loopId]);
+
+      // Not armed: nothing it is waiting on fires next.
+      assert.deepEqual((await kernel.whatFiresNext({ loop_id: loopId })).effects, []);
+      assert.deepEqual((await kernel.whatFiresNext({ when_id: repoRuns.id })).effects, []);
+
+      // The tick, past two daily slots, fires nothing and leaves the slot due.
+      for (const store of tickStores) {
+        const report = await tickAt("2026-11-12T09:30:00Z", store);
+        assert.deepEqual(report.fired, []);
+        assert.deepEqual(report.errors, []);
+      }
+      assert.equal((await nodeOf(dailyReview.id))?.next_fire_at, "2026-11-11T09:00:00Z");
+
+      // fire_event by event type + source: the held When does not fire.
+      const byEvent = await kernel.fireEvent({ event_type: "repo_runs", source: "ci", payload: { status: "green" }, idempotency_key: "ci-1" });
+      assert.deepEqual(byEvent.ledger_event.payload["when_ids"], []);
+      assert.deepEqual(byEvent.ledger_event.payload["held_when_ids"], [repoRuns.id]);
+      assert.deepEqual(byEvent.loop_ids, []);
+      // fire_event by when_id: refused, nothing recorded.
+      await assert.rejects(kernel.fireEvent({ when_id: repoRuns.id, idempotency_key: "ci-2" }), { code: "conflict" });
+      await assert.rejects(kernel.fireEvent({ when_id: resultsLand.id, idempotency_key: "results-1" }), { code: "conflict" });
+      assert.equal((await nodeOf(repoRuns.id))?.fire_count, 0);
+      assert.equal((await nodeOf(resultsLand.id))?.fire_count, 0);
+      assert.equal((await kernel.getLoop(loopId)).state, "suspended");
+
+      // Suspended is left only back to open; it is not a way to close or chase.
+      for (const to_state of ["waiting", "chased", "closed"] as const)
+        await assert.rejects(kernel.transition(loopId, { to_state, actor: "joe", evidence, idempotency_key: `x-${to_state}` }), {
+          code: "conflict",
+        });
+    } finally {
+      await closeAll();
+    }
+  });
+
+  test("resuming a suspended loop fires its next due slot once", { timeout: 300_000 }, async () => {
+    const { kernel, loopId, tickAt, nodeOf, closeAll } = await suspendedLoop();
+    try {
+      assert.deepEqual((await tickAt("2026-11-12T09:30:00Z")).fired, []);
+
+      const resumed = await kernel.transition(loopId, { to_state: "open", actor: "agent:cortexplane", evidence, idempotency_key: "resume-1" });
+      assert.equal(resumed.loop.state, "open");
+      assertValid("loop", resumed.loop);
+      assert.deepEqual(resumed.ledger_event.payload, { from_state: "suspended", to_state: "open", evidence });
+
+      const first = await tickAt("2026-11-12T09:31:00Z");
+      assert.deepEqual(
+        first.fired.map((f) => [f.when_id, f.next_fire_at]),
+        [[dailyReview.id, "2026-11-13T09:00:00.000Z"]],
+        "one firing, then the schedule moves past now",
+      );
+      assert.equal((await nodeOf(dailyReview.id))?.next_fire_at, "2026-11-13T09:00:00.000Z");
+      assert.deepEqual((await tickAt("2026-11-12T09:32:00Z")).fired, [], "the slot fires once");
+      const next = await tickAt("2026-11-13T09:00:00Z");
+      assert.deepEqual(next.fired.map((f) => [f.when_id, f.scheduled_for]), [[dailyReview.id, "2026-11-13T09:00:00.000Z"]]);
+
+      // Its event Whens are armed again too.
+      const fired = await kernel.fireEvent({ when_id: repoRuns.id, idempotency_key: "ci-3" });
+      assert.deepEqual(fired.loop_ids, [loopId]);
+    } finally {
+      await closeAll();
+    }
+  });
 });

@@ -2,7 +2,7 @@
 // contracts/schemas/v1 and contracts/openapi.json are the source of truth; the
 // kernel validates every record it writes against those schemas.
 
-export type LoopState = "proposed" | "open" | "waiting" | "chased" | "closed" | "closed_with_reason";
+export type LoopState = "proposed" | "open" | "waiting" | "chased" | "suspended" | "closed" | "closed_with_reason";
 export type CloseReason = "abandoned" | "superseded" | "no-longer-applies" | "rejected";
 export type Authority = "autonomous" | "joe-approves-each" | "joe-approves-template";
 export type EdgeType =
@@ -132,7 +132,7 @@ export type FireEventInput =
 export interface OpenLoopsFilter {
   accountable_who_id?: string;
   loop_type?: string;
-  state?: "proposed" | "open" | "waiting" | "chased";
+  state?: "proposed" | "open" | "waiting" | "chased" | "suspended";
   breaching_only?: boolean;
   /** Only loops whose key_result_ref is exactly this system and id. */
   key_result_ref?: KeyResultRef;

@@ -74,14 +74,24 @@ function pgTx(client: pg.PoolClient): TimerTx {
                 attributes -> 'schedule'      AS schedule,
                 attributes -> 'timezone'      AS timezone,
                 attributes ->> 'next_fire_at' AS next_fire_at
-           FROM nodes
+           FROM nodes n
           WHERE kind = 'when'
             AND status = 'active'
             AND attributes ->> 'when_type' = 'calendar'
             AND jsonb_typeof(attributes -> 'next_fire_at') = 'string'
             AND (attributes ->> 'next_fire_at')::timestamptz <= $1
+            -- Held: governed by a suspended loop and by no armed loop (LC-CP-SUSPEND).
+            AND NOT (
+              EXISTS (SELECT 1 FROM loops l
+                       WHERE l.state = 'suspended'
+                         AND (l.closing_when_id = n.id
+                              OR EXISTS (SELECT 1 FROM loop_members m WHERE m.loop_id = l.id AND m.node_id = n.id)))
+              AND NOT EXISTS (SELECT 1 FROM loops l
+                               WHERE l.state IN ('open', 'waiting', 'chased')
+                                 AND (l.closing_when_id = n.id
+                                      OR EXISTS (SELECT 1 FROM loop_members m WHERE m.loop_id = l.id AND m.node_id = n.id))))
           ORDER BY (attributes ->> 'next_fire_at')::timestamptz, id
-            FOR UPDATE SKIP LOCKED`,
+            FOR UPDATE OF n SKIP LOCKED`,
         [now.toISOString()],
       );
       return rows.map((r): DueCalendarWhen => ({ id: r.id, schedule: r.schedule, timezone: r.timezone, next_fire_at: r.next_fire_at }));

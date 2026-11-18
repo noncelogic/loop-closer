@@ -3,7 +3,7 @@
 //
 // Each transaction checks out one connection from the pool, runs BEGIN … COMMIT
 // on it, and rolls back if the callback throws. Due calendar Whens are claimed
-// with `FOR UPDATE SKIP LOCKED`, so a tick that overlaps another never sees a
+// with `FOR UPDATE OF n SKIP LOCKED`, so a tick that overlaps another never sees a
 // When the other holds; once that tick commits, the When's next_fire_at has
 // moved past now and it is no longer due. The ledger's unique idempotency key
 // backs this up: a firing can never be recorded twice. Ledger events go
@@ -76,14 +76,24 @@ function pgTx(client: pg.PoolClient, ageingPolicies: readonly AgeingPolicy[]): T
                 attributes -> 'schedule'      AS schedule,
                 attributes -> 'timezone'      AS timezone,
                 attributes ->> 'next_fire_at' AS next_fire_at
-           FROM public.nodes
+           FROM public.nodes n
           WHERE kind = 'when'
             AND status = 'active'
             AND attributes ->> 'when_type' = 'calendar'
             AND jsonb_typeof(attributes -> 'next_fire_at') = 'string'
             AND (attributes ->> 'next_fire_at')::timestamptz <= $1
+            -- Held: governed by a suspended loop and by no armed loop (LC-CP-SUSPEND).
+            AND NOT (
+              EXISTS (SELECT 1 FROM public.loops l
+                       WHERE l.state = 'suspended'
+                         AND (l.closing_when_id = n.id
+                              OR EXISTS (SELECT 1 FROM public.loop_members m WHERE m.loop_id = l.id AND m.node_id = n.id)))
+              AND NOT EXISTS (SELECT 1 FROM public.loops l
+                               WHERE l.state IN ('open', 'waiting', 'chased')
+                                 AND (l.closing_when_id = n.id
+                                      OR EXISTS (SELECT 1 FROM public.loop_members m WHERE m.loop_id = l.id AND m.node_id = n.id))))
           ORDER BY (attributes ->> 'next_fire_at')::timestamptz, id
-          FOR UPDATE SKIP LOCKED`,
+          FOR UPDATE OF n SKIP LOCKED`,
         [now],
       );
       return res.rows.map((r): DueCalendarWhen => ({
