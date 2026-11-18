@@ -2,7 +2,7 @@
 // .github/workflows/estate-image.yml publishes on merge to main runs the
 // portal-read entrypoint the suspended listings-read CronJob starts
 // (deploy/overlays/aks-obs-01/listings-read.yaml). The publish itself can only
-// act on main, on the estate's self-hosted runners, so ci.yml carries its
+// act on main, so ci.yml carries its
 // pull-request dry run (policy main-stays-green): job `estate-image-dry-run`
 // builds the same context and Dockerfile on a GitHub-hosted runner, pushes
 // nothing, and runs the CronJob's command in the built image through
@@ -72,7 +72,7 @@ test("the estate image built by the publish dry run starts the portal-read entry
   const job = (ci["jobs"] as Obj)[DRY_RUN_JOB] as Obj | undefined;
   assert.ok(job, `ci.yml has the ${DRY_RUN_JOB} job`);
   assert.equal(job["if"], undefined, "the dry run runs on every event, pull requests included");
-  assert.equal(job["runs-on"], "ubuntu-latest", "unmerged code never reaches the estate's self-hosted runners");
+  assert.equal(job["runs-on"], "ubuntu-latest", "the dry run runs on a GitHub-hosted runner");
   assert.deepEqual(job["permissions"], { contents: "read" }, "the dry run can read the repo and nothing else");
   const text = JSON.stringify(job);
   assert.ok(!/secrets\.|github\.token|vars\./.test(text), "the dry run reads no secret and no estate configuration");
