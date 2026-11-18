@@ -102,8 +102,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   # The pull-request dry run of .github/workflows/estate-image.yml (policy
-  # main-stays-green). The publish can only act on main, on the estate's
-  # self-hosted runners; this job builds the same context and Dockerfile on a
+  # main-stays-green). The publish can only act on main; this job builds the same context and Dockerfile on a
   # GitHub-hosted runner, tags it like the publish without a registry, pushes
   # nothing, and runs the listings-read CronJob's command in the built image
   # (deploy/overlays/aks-obs-01/listings-read.yaml), so a merge cannot publish
