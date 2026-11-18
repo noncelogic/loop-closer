@@ -49,8 +49,11 @@ fails with `repository variable <NAME> is not set` if any of them is empty.
     on `kv/data/loop-closer/registry-push` only. Used by the `publish` job.
   - Role `loop-closer-registry-push-check`: bound to repository
     `noncelogic/loop-closer` (pull requests included); policy grants `read`
-    on `kv/metadata/loop-closer/registry-push` only, so the dry run proves
-    the credential exists without ever reading it.
+    on `kv/metadata/loop-closer/registry-push`,
+    `auth/jwt/role/loop-closer-registry-push` and
+    `sys/policies/acl/loop-closer-registry-push` only, so the dry run proves
+    the credential exists and that the publish role's policy grants `read` on
+    `kv/data/loop-closer/registry-push`, without ever reading the credential.
 - **Writer:** the DevOps route, through the delegated OpenBao ops AppRole, as
   for `kv/loopcloser/registry-pull` (docs/ops/registry-pull.md).
 
@@ -70,8 +73,10 @@ build and smoke check.
 
 The `ci` workflow's `estate-image-inputs` job dry-runs the registry inputs:
 it runs `estate-registry-credential.mjs check` with the same variables, logs in
-to OpenBao as `loop-closer-registry-push-check` and checks
-`kv/loop-closer/registry-push` has a current version. It reads no secret and
+to OpenBao as `loop-closer-registry-push-check`, checks
+`kv/loop-closer/registry-push` has a current version and checks the
+`loop-closer-registry-push` role's policies grant `read` on its data path
+(none denies it). It reads no secret and
 never the credential itself, and fails naming the missing input
 (`ESTATE_REGISTRY`, `OPENBAO_ADDR`, the OIDC token or the credential).
 `tests/ci/estate-image-workflow.test.ts` runs the script against a local

@@ -132,8 +132,10 @@ jobs:
   # `check` mode with the same inputs: ESTATE_REGISTRY and OPENBAO_ADDR are set,
   # the job's OIDC token logs in to OpenBao as role
   # loop-closer-registry-push-check, and the push credential at
-  # kv/loop-closer/registry-push has a current version. Reads only that path's
-  # metadata, never the credential, and no repository secret. Fails naming the
+  # kv/loop-closer/registry-push has a current version that the publish role
+  # loop-closer-registry-push's policies grant read on. Reads only that path's
+  # metadata and the publish role's configuration and policy text, never the
+  # credential, and no repository secret. Fails naming the
   # missing input. Checked by tests/ci/estate-image-workflow.test.ts.
   estate-image-inputs:
     runs-on: ubuntu-latest

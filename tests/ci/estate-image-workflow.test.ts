@@ -105,10 +105,15 @@ const SCRIPT_REL = ".github/scripts/estate-registry-credential.mjs";
 const SCRIPT = join(repoRoot, SCRIPT_REL);
 const PUSH_ROLE = "loop-closer-registry-push";
 const CHECK_ROLE = "loop-closer-registry-push-check";
+const READ_DATA_POLICY = 'path "kv/data/loop-closer/registry-push" {\n  capabilities = ["read"]\n}\n';
+// Grants only the metadata: the credential exists but the publish cannot read it.
+const METADATA_ONLY_POLICY = 'path "kv/metadata/loop-closer/registry-push" {\n  capabilities = ["read"]\n}\n';
 
 interface FakeOpts {
   roles?: readonly string[];
   credential?: Record<string, string> | null;
+  /** ACL policy text of the publish role; the credential read honours it. */
+  pushPolicy?: string;
 }
 interface Fake {
   url: string;
@@ -119,6 +124,8 @@ interface Fake {
 async function fakeEstate(opts: FakeOpts = {}): Promise<Fake> {
   const roles = opts.roles ?? [PUSH_ROLE, CHECK_ROLE];
   const credential = opts.credential === undefined ? { username: "lc-push", password: "s3cret-push-token" } : opts.credential;
+  const pushPolicy = opts.pushPolicy ?? READ_DATA_POLICY;
+  const pushCanRead = pushPolicy === READ_DATA_POLICY;
   const requests: Fake["requests"] = [];
   const server = createServer((req, res) => {
     let raw = "";
@@ -144,7 +151,7 @@ async function fakeEstate(opts: FakeOpts = {}): Promise<Fake> {
         return send(200, { auth: { client_token: `token-${body.role}` } });
       }
       if (u.pathname === "/v1/kv/data/loop-closer/registry-push") {
-        if (token !== `token-${PUSH_ROLE}`) return send(403, { errors: ["permission denied"] });
+        if (token !== `token-${PUSH_ROLE}` || !pushCanRead) return send(403, { errors: ["permission denied"] });
         if (!credential) return send(404, { errors: [] });
         return send(200, { data: { data: credential, metadata: { version: 2 } } });
       }
@@ -152,6 +159,17 @@ async function fakeEstate(opts: FakeOpts = {}): Promise<Fake> {
         if (token !== `token-${CHECK_ROLE}` && token !== `token-${PUSH_ROLE}`) return send(403, { errors: ["permission denied"] });
         if (!credential) return send(404, { errors: [] });
         return send(200, { data: { current_version: 2, versions: { "1": { deletion_time: "", destroyed: false }, "2": { deletion_time: "", destroyed: false } } } });
+      }
+      // The check role may read the publish role's configuration and policy
+      // text (never the credential), the publish role may not.
+      if (u.pathname === `/v1/auth/jwt/role/${PUSH_ROLE}`) {
+        if (token !== `token-${CHECK_ROLE}`) return send(403, { errors: ["permission denied"] });
+        if (!roles.includes(PUSH_ROLE)) return send(404, { errors: [] });
+        return send(200, { data: { token_policies: [PUSH_ROLE] } });
+      }
+      if (u.pathname === `/v1/sys/policies/acl/${PUSH_ROLE}`) {
+        if (token !== `token-${CHECK_ROLE}`) return send(403, { errors: ["permission denied"] });
+        return send(200, { data: { name: PUSH_ROLE, policy: pushPolicy } });
       }
       return send(404, { errors: [] });
     });
@@ -260,13 +278,42 @@ test("the pull-request dry run fails naming the missing input when the registry 
   const docker = dockerStub();
   const fake = await fakeEstate();
   try {
-    // Everything reachable: passes, and reads only the metadata, never the credential.
+    // Everything reachable: passes, and reads only the metadata and the
+    // publish role's grants, never the credential.
     const ok = await runScript("check", runnerEnv(fake), docker.dir);
     assert.equal(ok.status, 0, ok.output);
     assert.deepEqual(
       fake.requests.map((q) => `${q.method} ${q.path}${q.role ? ` ${q.role}` : ""}`),
-      ["GET /oidc", `POST /v1/auth/jwt/login ${CHECK_ROLE}`, "GET /v1/kv/metadata/loop-closer/registry-push"],
+      [
+        "GET /oidc",
+        `POST /v1/auth/jwt/login ${CHECK_ROLE}`,
+        "GET /v1/kv/metadata/loop-closer/registry-push",
+        `GET /v1/auth/jwt/role/${PUSH_ROLE}`,
+        `GET /v1/sys/policies/acl/${PUSH_ROLE}`,
+      ],
     );
+    assert.ok(!fake.requests.some((q) => q.path.startsWith("/v1/kv/data/")), "the dry run never reads the credential");
+
+    // Metadata readable but the publish's credential read denied: the dry run
+    // fails exactly where the publish login would.
+    const denied = await fakeEstate({ pushPolicy: METADATA_ONLY_POLICY });
+    try {
+      const login = await runScript("login", runnerEnv(denied), docker.dir);
+      assert.notEqual(login.status, 0, "the publish login cannot read the credential");
+      assert.match(login.output, /read of kv\/loop-closer\/registry-push failed: HTTP 403/);
+      denied.requests.length = 0;
+      const r = await runScript("check", runnerEnv(denied), docker.dir);
+      assert.notEqual(r.status, 0, `metadata readable, credential read denied: the dry run fails: ${r.output}`);
+      assert.match(
+        r.output,
+        /::error::OpenBao push credential kv\/loop-closer\/registry-push is unreachable: role loop-closer-registry-push cannot read it/,
+      );
+      assert.ok(denied.requests.some((q) => q.path === "/v1/kv/metadata/loop-closer/registry-push"), "the metadata read succeeded first");
+      assert.ok(!denied.requests.some((q) => q.path.startsWith("/v1/kv/data/")), "the dry run still never reads the credential");
+    } finally {
+      await denied.close();
+    }
+    rmSync(docker.record, { force: true });
 
     const cases: [string, Record<string, string | undefined>, RegExp][] = [
       ["registry variable unset", { ...runnerEnv(fake), ESTATE_REGISTRY: "" }, /::error::repository variable ESTATE_REGISTRY is not set/],

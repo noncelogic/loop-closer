@@ -13,8 +13,12 @@
 // set, the job can mint a GitHub OIDC token (permissions id-token: write), and
 // OpenBao accepts it through JWT auth.
 //   check: logs in as role loop-closer-registry-push-check, which may read only
-//          the credential's KV metadata, and proves a current, undeleted
-//          version exists. It never reads the credential itself.
+//          the credential's KV metadata, the publish role's JWT configuration
+//          and that role's ACL policies. It proves a current, undeleted version
+//          exists and that the publish role's policies grant `read` on
+//          kv/data/loop-closer/registry-push (and none denies it), so a
+//          credential the publish could not read fails the dry run. It never
+//          reads the credential itself.
 //   login: logs in as role loop-closer-registry-push (bound to main), reads the
 //          credential's `username` and `password`, masks them and pipes the
 //          password to `docker login --password-stdin`. Nothing is written to
@@ -95,6 +99,55 @@ async function checkMetadata(addr, token) {
   return current;
 }
 
+/** The capabilities each ACL policy grants on one exact path (HCL or JSON policy text). */
+function pathCapabilities(policyText, path) {
+  const found = [];
+  const text = String(policyText ?? "");
+  try {
+    const doc = JSON.parse(text);
+    const rules = doc?.path ?? {};
+    for (const rule of Array.isArray(rules) ? rules : [rules]) {
+      const caps = rule?.[path]?.capabilities;
+      if (Array.isArray(caps)) found.push(...caps.map(String));
+    }
+    return found;
+  } catch {
+    // Not JSON: HCL.
+  }
+  const block = /path\s+"([^"]*)"\s*\{([^}]*)\}/g;
+  for (const [, p, body] of text.matchAll(block)) {
+    if (p !== path) continue;
+    const caps = /capabilities\s*=\s*\[([^\]]*)\]/.exec(body);
+    if (caps) found.push(...[...caps[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]));
+  }
+  return found;
+}
+
+/**
+ * Proves the publish role could read the credential without reading it: the
+ * role exists and its policies grant `read` on the credential's data path and
+ * none denies it. Reads only role configuration and policy text, no secret.
+ */
+async function checkPublishCanRead(addr, token) {
+  const role = ROLES.login;
+  const dataPath = `${KV_MOUNT}/data/${KV_KEY}`;
+  const body = await request(`read of OpenBao role ${role}`, `${addr}/v1/auth/${AUTH_MOUNT}/role/${role}`, {
+    headers: { "x-vault-token": token },
+  });
+  const policies = [...new Set([...(body?.data?.token_policies ?? []), ...(body?.data?.policies ?? [])].map(String))];
+  if (!policies.length) throw new InputError(`role ${role} has no policies, so the publish cannot read it`);
+  const caps = [];
+  for (const name of policies) {
+    const p = await request(`read of OpenBao policy ${name}`, `${addr}/v1/sys/policies/acl/${encodeURIComponent(name)}`, {
+      headers: { "x-vault-token": token },
+    });
+    caps.push(...pathCapabilities(p?.data?.policy, dataPath));
+  }
+  if (caps.includes("deny") || !caps.includes("read")) {
+    throw new InputError(`role ${role} cannot read it: its policies (${policies.join(", ")}) grant no read on ${dataPath}`);
+  }
+}
+
 async function readCredential(addr, token) {
   const body = await request(`read of ${CREDENTIAL_PATH}`, `${addr}/v1/${KV_MOUNT}/data/${KV_KEY}`, {
     headers: { "x-vault-token": token },
@@ -140,7 +193,8 @@ async function main(mode) {
     const token = await openbaoLogin(addr, ROLES[mode], jwt);
     if (mode === "check") {
       const version = await checkMetadata(addr, token);
-      console.log(`ok: ESTATE_REGISTRY is set and OpenBao push credential ${CREDENTIAL_PATH} is reachable (version ${version})`);
+      await checkPublishCanRead(addr, token);
+      console.log(`ok: ESTATE_REGISTRY is set and OpenBao push credential ${CREDENTIAL_PATH} is reachable (version ${version}) and readable by role ${ROLES.login}`);
       return;
     }
     const credential = await readCredential(addr, token);
