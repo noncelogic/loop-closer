@@ -223,6 +223,22 @@ function scriptStep(job: Obj, mode: string): Obj {
   return step;
 }
 
+// COND-240-merge1: the merge of main kept both sides of the publish job: the
+// OpenBao-backed login (this item) and main's pushed-digest record
+// (LC-EST-IMAGE-READY), with the registry logout last so it runs after both.
+test("the publish job keeps the OpenBao login, main's pushed-digest record and a final registry logout", () => {
+  const steps = ((load("estate-image.yml")["jobs"] as Obj)["publish"] as Obj)["steps"] as Obj[];
+  const login = steps.indexOf(scriptStep({ steps }, "login"));
+  const push = steps.findIndex((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
+  const record = steps.findIndex((s) => s["name"] === "Record pushed digest");
+  const logout = steps.findIndex((s) => String(s["run"] ?? "").startsWith("docker logout"));
+  assert.ok(login >= 0 && push > login && record > push && logout > record, "login, push, record digest, then logout");
+  assert.equal(steps[push]!["id"], "push");
+  assert.deepEqual(steps[record]!["env"], { DIGEST: "${{ steps.push.outputs.digest }}", IMAGE: "${{ vars.ESTATE_REGISTRY }}/loopcloser" });
+  assert.equal(steps[logout]!["if"], "always()");
+  assert.equal(logout, steps.length - 1, "the logout is the last step");
+});
+
 test("the publish job reads the registry push credential from the loop-closer OpenBao path, never from repository secrets", async () => {
   const text = readFileSync(join(WORKFLOWS, "estate-image.yml"), "utf8");
   const wf = parse(text) as Obj;
