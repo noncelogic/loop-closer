@@ -2,12 +2,15 @@
 # the tracked directory listings (SPEC.md, directory-listing loops), because
 # no listings API exists. It runs the portal-read entrypoint
 # (`node dist/portal-read.js`, the image build's output of src/portal-read.ts)
-# with the listing page URLs from the ConfigMap below.
+# with the listing page URLs from the tracked-listings ConfigMap below, its
+# only source of listing URLs.
 #
-# Shipped SUSPENDED, with fixture URLs on reserved domains: no listing URL is
-# recorded yet, and the overlay's pinned image predates src/portal-read.ts.
-# Activation replaces the URLs, rolls newTag to an image that carries the
-# entrypoint and sets `suspend: false`.
+# The ConfigMap holds exactly the live public page URLs SPEC.md records beside
+# each listing (CLOSER-205's current default) and no fixture URL. SPEC.md names
+# the Rove connector and plugin listings but records no URL for either, so the
+# list is empty and the CronJob ships SUSPENDED (the overlay's pinned image also
+# predates src/portal-read.ts). Activation (CLOSER-215) adds the recorded URLs
+# and sets `suspend: false`; the image rollout is CLOSER-216.
 #
 # The public read needs no credential (CLOSER-122): nothing is mounted, no
 # ServiceAccount token is automounted, and the only Secret referenced is the
@@ -22,11 +25,9 @@ metadata:
     app.kubernetes.io/component: listings-read
 data:
   # LISTINGS_DIRECTORY_PAGES: JSON object, listing → public directory page URL.
+  # Empty: SPEC.md records no listing URL yet.
   directory-pages.json: |
-    {
-      "rove-connector": "https://listings.example.invalid/rove-connector",
-      "rove-plugin": "https://listings.example.invalid/rove-plugin"
-    }
+    {}
 ---
 apiVersion: batch/v1
 kind: CronJob
