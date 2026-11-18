@@ -184,8 +184,9 @@ test("the rendered aks-obs-01 overlay passes the offline schema check including 
 // suspended, running the portal-read entrypoint (src/portal-read.ts) with the
 // listing page URLs from a ConfigMap. The public listing read needs no
 // credential (CLOSER-122), so the only Secret it references is the graph's
-// DATABASE_URL, and it mounts nothing. The URLs are fixtures on reserved
-// domains: no listing URL is recorded yet (SPEC.md names the listings only).
+// DATABASE_URL, and it mounts nothing. No listing URL is recorded yet
+// (SPEC.md names the listings only), so the ConfigMap tracks none
+// (LC-EST-PORTAL-LISTINGS-NOFIX, test/deploy/aks-obs-01-listings-read.test.ts).
 test("the listings-read CronJob runs the portal-read entrypoint with listing URLs from its ConfigMap and mounts no credential", () => {
   const objs = render();
   const cron = one(objs, "CronJob", LISTINGS_READ);
@@ -220,17 +221,13 @@ test("the listings-read CronJob runs the portal-read entrypoint with listing URL
   const secretRefs = (c["env"] as Obj[]).flatMap((e) => (e["valueFrom"]?.["secretKeyRef"] ? [e["valueFrom"]["secretKeyRef"]] : []));
   assert.deepEqual(secretRefs, [{ name: DB_SECRET, key: "uri" }], "only the database URI Secret");
 
-  // The ConfigMap holds a configuration the reader accepts, on fixture hosts only.
+  // The ConfigMap holds a configuration the reader parses: no listing is
+  // tracked until SPEC.md records one's URL.
   const cm = one(objs, "ConfigMap", LISTINGS_PAGES);
   assert.equal(cm["metadata"]["namespace"], NAMESPACE);
   const raw = cm["data"]?.[ref["key"] as string] as string | undefined;
   assert.ok(raw, `ConfigMap/${LISTINGS_PAGES} carries key ${ref["key"]}`);
-  const config = loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: raw });
-  assert.ok(config && config.listings.length > 0, "at least one listing the reader accepts");
-  for (const l of config.listings) {
-    const host = new URL(l.url).hostname;
-    assert.ok(/(^|\.)(example\.(com|org|net)|invalid)$/.test(host), `${l.subject}: ${l.url} is a fixture URL on a reserved domain`);
-  }
+  assert.equal(loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: raw }), undefined, "no listing tracked yet");
 
   // Syncs after the schema Job, like the other database readers.
   assert.ok(wave(cron) > wave(job), `the listings read (wave ${wave(cron)}) syncs after the schema Job (wave ${wave(job)})`);
