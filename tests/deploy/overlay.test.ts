@@ -1,6 +1,8 @@
 // LC-EST-OVERLAY acceptance: deploy/overlays/aks-obs-01, the overlay the
 // estate's Argo CD syncs, pins the API Deployment and the schema Job to one
-// estate-registry loopcloser:sha-<commit> image. The Job runs the migrate
+// estate-registry loopcloser image: its sha-<commit> tag, or, once a pull of
+// it on aks-obs-01 is verified, the digest the publish run pushed
+// (LC-EST-IMAGE-READY, tests/deploy/estate-image-pin.ts). The Job runs the migrate
 // entrypoint with DATABASE_URL from loopcloser-db-app/uri as an Argo CD
 // Sync-phase hook, in a wave after the CNPG cluster and before the API. The
 // tick CronJob, unsuspended here, is checked by aks-obs-01-overlay.test.ts.
@@ -16,6 +18,7 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { kustomizeBuild, parseObjects, repoRoot, SCHEMA_DIR, validate, type Obj } from "./manifest-check.ts";
 import { buildEntrypoints, manifestScriptIn } from "../support/entrypoint-build.ts";
+import { PINNED_ESTATE_IMAGE, readEvidence } from "./estate-image-pin.ts";
 
 const OVERLAY = join(repoRoot, "deploy", "overlays", "aks-obs-01");
 const NAMESPACE = "loop-closer";
@@ -25,8 +28,9 @@ const API = "loopcloser";
 const SCHEMA_JOB = "loopcloser-schema";
 const PULL_SECRET = "loopcloser-registry-pull";
 const LISTINGS_READ = "loopcloser-listings-read";
-// .github/workflows/estate-image.yml pushes `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>`.
-const ESTATE_IMAGE = /^(?<repo>[a-z0-9.-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)*\/loopcloser):sha-(?<sha>[0-9a-f]{40})$/;
+// .github/workflows/estate-image.yml pushes `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>`
+// and reports the digest of that push; the overlay pins one or the other.
+const ESTATE_IMAGE = PINNED_ESTATE_IMAGE;
 
 function render(): Obj[] {
   return parseObjects(kustomizeBuild(OVERLAY));
@@ -68,18 +72,23 @@ function pullRegistryHost(): string {
   return m[1]!;
 }
 
-test("the aks-obs-01 overlay pins the API and the schema Job to the same estate-registry sha tag with DATABASE_URL from loopcloser-db-app", () => {
+test("the aks-obs-01 overlay pins the API and the schema Job to the same estate-registry image, by sha tag or verified digest, with DATABASE_URL from loopcloser-db-app", () => {
   const objs = render();
   const api = one(objs, "Deployment", API);
   const job = one(objs, "Job", SCHEMA_JOB);
   const apiContainer = soleContainer(api);
   const jobContainer = soleContainer(job);
 
-  // One image, pinned to the estate registry's sha-<commit> tag: never the
-  // floating GHCR `main` tag the base package carries.
+  // One image, pinned to the estate registry's sha-<commit> tag or to the
+  // digest the publish run pushed: never the floating GHCR `main` tag the
+  // base package carries.
   const image = apiContainer["image"] as string;
   const m = ESTATE_IMAGE.exec(image);
-  assert.ok(m, `the API image ${image} is <estate registry>/loopcloser:sha-<40-hex commit>`);
+  assert.ok(m, `the API image ${image} is <estate registry>/loopcloser:sha-<40-hex commit> or @sha256:<digest>`);
+  if (m.groups!["digest"] !== undefined) {
+    // A digest is only ever the one the publish run pushed and aks-obs-01 pulled.
+    assert.equal(m.groups!["digest"], readEvidence()?.digest, "the digest recorded in image-evidence.json");
+  }
   assert.notEqual(m.groups!["repo"], "ghcr.io/noncelogic/loop-closer", "not the CI (job `image`) package");
   assert.equal(m.groups!["repo"]!.split("/")[0], pullRegistryHost(), "the registry the estate pull credential covers");
   assert.equal(jobContainer["image"], image, "the schema Job runs the API's image");
