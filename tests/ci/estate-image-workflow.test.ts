@@ -69,8 +69,14 @@ test("the estate image job targets a runner label available to loop-closer", () 
     }
   }
 
-  // The concurrency group that serialises image pushes stays as it was.
-  assert.deepEqual(wf["concurrency"], { group: "estate-image", "cancel-in-progress": false });
+  // Image pushes stay serialised without cancelling a run in progress, in a
+  // fresh group (estate-image-hosted-v1): the old `estate-image` group is
+  // still held by run 44147944903, queued for the passband-ci label that no
+  // longer exists, so every hosted run waiting in that group was cancelled.
+  assert.deepEqual(wf["concurrency"], { group: "estate-image-hosted-v1", "cancel-in-progress": false });
+  // Publication stays main-only.
+  assert.deepEqual(Object.keys(wf["on"] as Obj), ["push"]);
+  assert.deepEqual((wf["on"] as Obj)["push"], { branches: ["main"] });
 });
 
 test("a job that targets a runner label registered only for another repository is caught", () => {

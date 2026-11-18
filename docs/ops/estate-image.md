@@ -9,8 +9,11 @@ touches a cluster: rollout is estate-side GitOps, pinning a `sha-<commit>` tag.
 
 It used to target the estate's `passband-ci` self-hosted runners, but those
 are registered only for `noncelogic/loopmentum`, so no run ever started
-(LC-ESTATE-IMAGE-RUNNER). The `estate-image` concurrency group still
-serialises pushes, without cancelling a run in progress.
+(LC-ESTATE-IMAGE-RUNNER). The `estate-image-hosted-v1` concurrency group
+serialises pushes, without cancelling a run in progress. It replaces the old
+`estate-image` group, which run 44147944903 (queued for the retired
+`passband-ci` label) still holds: every hosted run that waited in that group
+was cancelled behind it, so nothing was published.
 
 The registry push credential is per product (policy
 `registry-credential-per-product`). The job reads it from the repository
