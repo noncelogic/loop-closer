@@ -51,7 +51,7 @@ directory (default `db/migrations` under the app root). `tests/schema/migrate.te
 `ghcr.io/noncelogic/loop-closer` on pushes to `main`. On the same pushes,
 `.github/workflows/estate-image.yml` builds it on a GitHub-hosted runner and pushes
 `<estate registry>/loopcloser:sha-<commit>` to the registry aks-obs-01 pulls from, logging in
-with repository secrets (docs/ops/estate-image.md). `deploy/base/` holds the kustomize
+with loop-closer's push credential from OpenBao, `kv/loop-closer/registry-push` (docs/ops/estate-image.md). `deploy/base/` holds the kustomize
 package for aks-obs-01 (namespace `loop-closer`, CNPG cluster `loopcloser-db`, API
 Deployment/Service, per-minute tick CronJob shipped suspended, OpenBao ExternalSecrets), and
 `deploy/overlays/aks-obs-01/` is what the estate's Argo CD syncs: it pins every loopcloser

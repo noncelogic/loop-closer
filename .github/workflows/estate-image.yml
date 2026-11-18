@@ -6,18 +6,23 @@ name: estate-image
 #
 # Trigger is `push` to main only: no pull_request, pull_request_target or
 # workflow_run, so unmerged code never reaches the registry push credential
-# (docs/EXTERNAL-REVIEW.md §1). The pull-request dry run is ci.yml's
-# `estate-image-dry-run` job.
+# (docs/EXTERNAL-REVIEW.md §1). The pull-request dry runs are ci.yml's
+# `estate-image-dry-run` (build) and `estate-image-inputs` (registry inputs).
 #
 # Runner: GitHub-hosted, as ci.yml is (LC-ESTATE-IMAGE-RUNNER). The estate's
 # passband-ci runners are registered only for noncelogic/loopmentum, so runs
-# that asked for them never started. The registry login comes from repository
-# secrets; the registry host is a repository variable:
-#   ESTATE_REGISTRY                  (variable) registry aks-obs-01 pulls from
-#   ESTATE_REGISTRY_USERNAME         (secret)   registry push username
-#   ESTATE_REGISTRY_PASSWORD         (secret)   registry push password/token
-# tests/deploy/image-workflow.test.ts and tests/ci/estate-image-workflow.test.ts
-# check this file.
+# that asked for them never started.
+#
+# Registry login (LC-EST-IMAGE-PUBLISH): loop-closer's own least-privilege push
+# credential, custodied in OpenBao at kv/loop-closer/registry-push (Rule:
+# policies/placement-defaults.yaml#credentials), read through GitHub OIDC and
+# OpenBao JWT auth by .github/scripts/estate-registry-credential.mjs. No
+# repository secret is read. Repository variables:
+#   ESTATE_REGISTRY   registry aks-obs-01 pulls from
+#   OPENBAO_ADDR      estate OpenBao address
+# ci.yml's `estate-image-inputs` job runs the same script in `check` mode on
+# every pull request. tests/deploy/image-workflow.test.ts and
+# tests/ci/estate-image-workflow.test.ts check this file.
 on:
   push:
     branches: [main]
@@ -33,34 +38,21 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # id-token: write lets the job mint the OIDC token OpenBao's JWT auth
+    # accepts for role loop-closer-registry-push (bound to main).
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Check estate registry configuration
-        env:
-          ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
-          ESTATE_REGISTRY_USERNAME: ${{ secrets.ESTATE_REGISTRY_USERNAME }}
-          ESTATE_REGISTRY_PASSWORD: ${{ secrets.ESTATE_REGISTRY_PASSWORD }}
-        run: |
-          missing=0
-          if [ -z "$ESTATE_REGISTRY" ]; then
-            echo "::error::repository variable ESTATE_REGISTRY is not set"
-            missing=1
-          fi
-          for v in ESTATE_REGISTRY_USERNAME ESTATE_REGISTRY_PASSWORD; do
-            if [ -z "${!v}" ]; then
-              echo "::error::repository secret $v is not set"
-              missing=1
-            fi
-          done
-          exit "$missing"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ vars.ESTATE_REGISTRY }}
-          username: ${{ secrets.ESTATE_REGISTRY_USERNAME }}
-          password: ${{ secrets.ESTATE_REGISTRY_PASSWORD }}
+      - name: Log in to the estate registry with the OpenBao push credential
+        env:
+          ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
+        run: node .github/scripts/estate-registry-credential.mjs login
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -69,3 +61,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Log out of the estate registry
+        if: always()
+        env:
+          ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
+        run: docker logout "$ESTATE_REGISTRY" || true

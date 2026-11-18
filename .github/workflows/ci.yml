@@ -126,3 +126,27 @@ jobs:
           tags: loopcloser:sha-${{ github.sha }}
       - name: Run the portal-read entrypoint in the built image
         run: bash .github/scripts/estate-image-smoke.sh loopcloser:sha-${{ github.sha }} node dist/portal-read.js
+
+  # The pull-request dry run of the publish's registry inputs (policy
+  # main-stays-green, LC-EST-IMAGE-PUBLISH). Runs the publish's own script in
+  # `check` mode with the same inputs: ESTATE_REGISTRY and OPENBAO_ADDR are set,
+  # the job's OIDC token logs in to OpenBao as role
+  # loop-closer-registry-push-check, and the push credential at
+  # kv/loop-closer/registry-push has a current version. Reads only that path's
+  # metadata, never the credential, and no repository secret. Fails naming the
+  # missing input. Checked by tests/ci/estate-image-workflow.test.ts.
+  estate-image-inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check the estate registry variable and OpenBao push credential are reachable
+        env:
+          ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
+        run: node .github/scripts/estate-registry-credential.mjs check
