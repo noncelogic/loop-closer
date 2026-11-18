@@ -80,3 +80,40 @@ test("npm test runs this acceptance file", () => {
   const dir = self.split("/").slice(0, -1).join("/");
   assert.ok(script.includes(`"${dir}/**/*.test.ts"`), `the npm test script globs ${dir}/**/*.test.ts (${self})`);
 });
+
+// LC-EST-TICK-SYNC acceptance: once Argo CD syncs the overlay, the tick runs
+// every minute on aks-obs-01 and fires each due armed When exactly once
+// (Rule: policies/placement-defaults.yaml#estate). Exactly once on the
+// CronJob side means no two tick runs overlap (Forbid), a failed run is not
+// retried inside its minute (backoffLimit 0; the next tick picks up what is
+// still due), and a run ends before the next minute's run is scheduled.
+test("the aks-obs-01 tick CronJob is unsuspended on a per-minute schedule with concurrencyPolicy Forbid", () => {
+  const objs = parseObjects(kustomizeBuild(OVERLAY));
+  const ticks = objs.filter((o) => o["kind"] === "CronJob" && o["metadata"]?.["name"] === "loopcloser-tick");
+  assert.equal(ticks.length, 1, "exactly one CronJob/loopcloser-tick");
+  const tick = ticks[0]!;
+  const spec = tick["spec"] as Obj;
+
+  assert.equal(spec["suspend"], false, "the tick CronJob is unsuspended on aks-obs-01");
+  assert.equal(spec["schedule"], "* * * * *", "the tick runs every minute");
+  assert.equal(spec["concurrencyPolicy"], "Forbid", "no two tick runs overlap");
+  assert.equal(annotations(tick)["argocd.argoproj.io/hook"], undefined, "the tick is a synced resource, not a hook");
+
+  const job = spec["jobTemplate"]["spec"] as Obj;
+  assert.equal(job["backoffLimit"], 0, "a failed tick is not retried; the next minute's tick fires what is due");
+  assert.ok(
+    typeof job["activeDeadlineSeconds"] === "number" && job["activeDeadlineSeconds"] < 60,
+    `a tick run ends within its minute (activeDeadlineSeconds ${job["activeDeadlineSeconds"]})`,
+  );
+  assert.ok(
+    typeof spec["startingDeadlineSeconds"] === "number" && spec["startingDeadlineSeconds"] < 60,
+    "a missed start is skipped, not run late alongside the next minute's tick",
+  );
+
+  const containers = job["template"]["spec"]["containers"] as Obj[];
+  assert.deepEqual(
+    containers.map((c) => c["command"]),
+    [["node", "dist/tick.js"]],
+    "the tick runs only the tick entrypoint",
+  );
+});
