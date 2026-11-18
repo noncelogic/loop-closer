@@ -99,27 +99,149 @@ async function checkMetadata(addr, token) {
   return current;
 }
 
-/** The capabilities each ACL policy grants on one exact path (HCL or JSON policy text). */
-function pathCapabilities(policyText, path) {
+/**
+ * Tokenises ACL policy HCL. Comments (`#`, `//`, `/* *\/`) are dropped, so a
+ * commented-out grant is never read as an active one; strings keep their
+ * escapes. Anything outside the subset ACL policies use (heredocs, stray
+ * characters, an unterminated string or comment) throws, so the dry run fails
+ * closed instead of guessing.
+ */
+function hclTokens(text) {
+  const tokens = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (/\s/.test(c)) {
+      i++;
+    } else if (c === "#" || (c === "/" && text[i + 1] === "/")) {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) throw new Error("unterminated /* comment");
+      i = end + 2;
+    } else if (c === '"') {
+      let value = "";
+      i++;
+      for (;;) {
+        if (i >= text.length || text[i] === "\n") throw new Error("unterminated string");
+        const ch = text[i++];
+        if (ch === '"') break;
+        if (ch === "\\") {
+          const esc = text[i++];
+          value += esc === "n" ? "\n" : esc === "t" ? "\t" : esc;
+        } else {
+          value += ch;
+        }
+      }
+      tokens.push({ kind: "string", value });
+    } else if ("{}[]=,:".includes(c)) {
+      tokens.push({ kind: c });
+      i++;
+    } else if (/[A-Za-z0-9_.\-]/.test(c)) {
+      const m = /^[A-Za-z0-9_.\-]+/.exec(text.slice(i));
+      tokens.push({ kind: "word", value: m[0] });
+      i += m[0].length;
+    } else {
+      throw new Error(`unexpected ${JSON.stringify(c)}`);
+    }
+  }
+  return tokens;
+}
+
+/** Parses ACL policy HCL into `{ path: [{ path, capabilities }] }`; throws on anything else. */
+function parseHclPolicy(text) {
+  const t = hclTokens(text);
+  let i = 0;
+  const peek = () => t[i]?.kind;
+  const expect = (kind) => {
+    if (t[i]?.kind !== kind) throw new Error(`expected ${kind}, found ${t[i]?.kind ?? "end of policy"}`);
+    return t[i++];
+  };
+  function value() {
+    const k = peek();
+    if (k === "string" || k === "word") return t[i++].value;
+    if (k === "[") {
+      i++;
+      const list = [];
+      while (peek() !== "]") {
+        list.push(value());
+        if (peek() === ",") i++;
+        else if (peek() !== "]") throw new Error("expected , or ] in list");
+      }
+      i++;
+      return list;
+    }
+    if (k === "{") {
+      i++;
+      const obj = body("}");
+      i++;
+      return obj;
+    }
+    throw new Error(`unexpected ${k ?? "end of policy"}`);
+  }
+  // A body: `key = value` attributes and `name "label" { ... }` blocks.
+  function body(close) {
+    const attrs = {};
+    const blocks = [];
+    while (peek() !== close) {
+      if (peek() !== "word" && peek() !== "string") throw new Error(`unexpected ${peek() ?? "end of policy"}`);
+      const key = t[i++].value;
+      if (peek() === "=" || peek() === ":") {
+        i++;
+        attrs[key] = value();
+        if (peek() === ",") i++;
+        continue;
+      }
+      const labels = [];
+      while (peek() === "string") labels.push(t[i++].value);
+      expect("{");
+      const inner = body("}");
+      i++;
+      blocks.push({ type: key, labels, ...inner });
+    }
+    return { attrs, blocks };
+  }
+  const doc = body(undefined);
+  const rules = [];
+  for (const b of doc.blocks) {
+    if (b.type !== "path") continue;
+    if (b.labels.length !== 1) throw new Error("a path block takes exactly one path");
+    const caps = b.attrs.capabilities ?? [];
+    if (!Array.isArray(caps) || caps.some((c) => typeof c !== "string")) throw new Error(`capabilities of path "${b.labels[0]}" is not a list of strings`);
+    rules.push({ path: b.labels[0], capabilities: caps });
+  }
+  return rules;
+}
+
+/**
+ * The capabilities one ACL policy grants on one exact path (HCL or JSON policy
+ * text). Policy text that cannot be parsed throws, so it never counts as a
+ * grant.
+ */
+function pathCapabilities(name, policyText, path) {
   const found = [];
   const text = String(policyText ?? "");
+  let doc;
   try {
-    const doc = JSON.parse(text);
+    doc = JSON.parse(text);
+  } catch {
+    doc = undefined; // Not JSON: HCL.
+  }
+  if (doc !== undefined) {
     const rules = doc?.path ?? {};
     for (const rule of Array.isArray(rules) ? rules : [rules]) {
       const caps = rule?.[path]?.capabilities;
       if (Array.isArray(caps)) found.push(...caps.map(String));
     }
     return found;
-  } catch {
-    // Not JSON: HCL.
   }
-  const block = /path\s+"([^"]*)"\s*\{([^}]*)\}/g;
-  for (const [, p, body] of text.matchAll(block)) {
-    if (p !== path) continue;
-    const caps = /capabilities\s*=\s*\[([^\]]*)\]/.exec(body);
-    if (caps) found.push(...[...caps[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]));
+  let rules;
+  try {
+    rules = parseHclPolicy(text);
+  } catch (err) {
+    throw new InputError(`OpenBao policy ${name} could not be parsed (${err.message}), so its grants are unknown`);
   }
+  for (const rule of rules) if (rule.path === path) found.push(...rule.capabilities);
   return found;
 }
 
@@ -141,7 +263,7 @@ async function checkPublishCanRead(addr, token) {
     const p = await request(`read of OpenBao policy ${name}`, `${addr}/v1/sys/policies/acl/${encodeURIComponent(name)}`, {
       headers: { "x-vault-token": token },
     });
-    caps.push(...pathCapabilities(p?.data?.policy, dataPath));
+    caps.push(...pathCapabilities(name, p?.data?.policy, dataPath));
   }
   if (caps.includes("deny") || !caps.includes("read")) {
     throw new InputError(`role ${role} cannot read it: its policies (${policies.join(", ")}) grant no read on ${dataPath}`);

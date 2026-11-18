@@ -114,6 +114,8 @@ interface FakeOpts {
   credential?: Record<string, string> | null;
   /** ACL policy text of the publish role; the credential read honours it. */
   pushPolicy?: string;
+  /** Whether that policy really lets the publish read the credential (default: it is READ_DATA_POLICY). */
+  pushCanRead?: boolean;
 }
 interface Fake {
   url: string;
@@ -125,7 +127,7 @@ async function fakeEstate(opts: FakeOpts = {}): Promise<Fake> {
   const roles = opts.roles ?? [PUSH_ROLE, CHECK_ROLE];
   const credential = opts.credential === undefined ? { username: "lc-push", password: "s3cret-push-token" } : opts.credential;
   const pushPolicy = opts.pushPolicy ?? READ_DATA_POLICY;
-  const pushCanRead = pushPolicy === READ_DATA_POLICY;
+  const pushCanRead = opts.pushCanRead ?? pushPolicy === READ_DATA_POLICY;
   const requests: Fake["requests"] = [];
   const server = createServer((req, res) => {
     let raw = "";
@@ -312,6 +314,52 @@ test("the pull-request dry run fails naming the missing input when the registry 
       assert.ok(!denied.requests.some((q) => q.path.startsWith("/v1/kv/data/")), "the dry run still never reads the credential");
     } finally {
       await denied.close();
+    }
+
+    // Commented-out grants are not grants: with only metadata access and the
+    // data grant commented out, the publish login gets HTTP 403, so the dry
+    // run must fail too.
+    for (const commented of [
+      `${METADATA_ONLY_POLICY}# path "kv/data/loop-closer/registry-push" { capabilities = ["read"] }\n`,
+      `${METADATA_ONLY_POLICY}// path "kv/data/loop-closer/registry-push" { capabilities = ["read"] }\n`,
+      `${METADATA_ONLY_POLICY}/*\npath "kv/data/loop-closer/registry-push" {\n  capabilities = ["read"]\n}\n*/\n`,
+      `path "kv/data/loop-closer/registry-push" {\n  # capabilities = ["read"]\n  capabilities = ["list"]\n}\n`,
+    ]) {
+      const f = await fakeEstate({ pushPolicy: commented, pushCanRead: false });
+      try {
+        const login = await runScript("login", runnerEnv(f), docker.dir);
+        assert.notEqual(login.status, 0, "the publish login cannot read the credential");
+        assert.match(login.output, /read of kv\/loop-closer\/registry-push failed: HTTP 403/);
+        const r = await runScript("check", runnerEnv(f), docker.dir);
+        assert.notEqual(r.status, 0, `commented-out grant: the dry run fails: ${commented}\n${r.output}`);
+        assert.match(
+          r.output,
+          /::error::OpenBao push credential kv\/loop-closer\/registry-push is unreachable: role loop-closer-registry-push cannot read it/,
+        );
+      } finally {
+        await f.close();
+      }
+    }
+
+    // A real grant beside comments (including `#` and `//` inside strings) still
+    // passes; policy text that cannot be parsed fails closed.
+    const commentedPolicy =
+      '# publish role\n/* least privilege */\npath "kv/data/loop-closer/registry-push" { // the credential\n  capabilities = ["read", ] # only read\n}\n' +
+      'path "kv/metadata/a#b//c" {\n  capabilities = ["read"]\n}\n';
+    const withComments = await fakeEstate({ pushPolicy: commentedPolicy, pushCanRead: true });
+    try {
+      const r = await runScript("check", runnerEnv(withComments), docker.dir);
+      assert.equal(r.status, 0, r.output);
+    } finally {
+      await withComments.close();
+    }
+    const unparseable = await fakeEstate({ pushPolicy: 'path "kv/data/loop-closer/registry-push" {\n  capabilities = ["read"]\n', pushCanRead: true });
+    try {
+      const r = await runScript("check", runnerEnv(unparseable), docker.dir);
+      assert.notEqual(r.status, 0, r.output);
+      assert.match(r.output, /::error::OpenBao push credential kv\/loop-closer\/registry-push is unreachable: OpenBao policy loop-closer-registry-push could not be parsed/);
+    } finally {
+      await unparseable.close();
     }
     rmSync(docker.record, { force: true });
 
