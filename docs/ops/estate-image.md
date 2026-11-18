@@ -1,8 +1,8 @@
 # Estate image publish
 
 `.github/workflows/estate-image.yml` runs on every merge to `main`. It builds
-the loopcloser image on a GitHub-hosted runner (`ubuntu-latest`, as `ci` does)
-and pushes it to the estate registry that aks-obs-01 pulls from as
+the loopcloser image on the estate's self-hosted ARC org scale set
+`noncelogic-org` (`runs-on: [self-hosted, aks]`, as every `ci` job does) and pushes it to the estate registry that aks-obs-01 pulls from as
 `loopcloser:sha-<commit>`, i.e.
 `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>`. The workflow never
 touches a cluster: rollout is estate-side GitOps, pinning a `sha-<commit>` tag.
@@ -14,6 +14,14 @@ serialises pushes, without cancelling a run in progress. It replaces the old
 `estate-image` group, which run 44147944903 (queued for the retired
 `passband-ci` label) still holds: every hosted run that waited in that group
 was cancelled behind it, so nothing was published.
+
+The workflows then ran on GitHub-hosted runners, against policy
+`no-github-hosted-runners` (Rule: policies/placement-defaults.yaml#estate), and
+a GitHub-hosted runner cannot reach the estate OpenBao, so the publish could not
+log in for its push credential. Since LC-EST-PUBLISH-RUNNER every job in `ci`
+and `estate-image` runs on the org scale set, which serves every private
+noncelogic repository; its runner image has no node, so jobs that run node set
+it up with `actions/setup-node`. `tests/workflows/runners.test.ts` checks this.
 
 The registry push credential is loop-closer's own, least privilege (push to
 `loopcloser` only), per product (policy `registry-credential-per-product`),
@@ -67,7 +75,7 @@ If the login fails, the step's error names the input:
 
 The publish acts only on `main`, so every pull request proves it first: the
 `ci` workflow's `estate-image-dry-run` job builds the same context and
-Dockerfile on a GitHub-hosted runner, tags it `loopcloser:sha-<commit>`
+Dockerfile on the org scale set, tags it `loopcloser:sha-<commit>`
 without a registry, pushes nothing, and runs the listings-read CronJob's
 command (`node dist/portal-read.js`) in the built image through
 `.github/scripts/estate-image-smoke.sh`. It reads no secret and no repository

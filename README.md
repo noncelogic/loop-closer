@@ -49,7 +49,7 @@ directory (default `db/migrations` under the app root). `tests/schema/migrate.te
 
 `Dockerfile` builds the service image; CI (job `image`) publishes it to
 `ghcr.io/noncelogic/loop-closer` on pushes to `main`. On the same pushes,
-`.github/workflows/estate-image.yml` builds it on a GitHub-hosted runner and pushes
+`.github/workflows/estate-image.yml` builds it on the estate's self-hosted ARC runners (`[self-hosted, aks]`) and pushes
 `<estate registry>/loopcloser:sha-<commit>` to the registry aks-obs-01 pulls from, logging in
 with loop-closer's push credential from OpenBao, `kv/loop-closer/registry-push` (docs/ops/estate-image.md). `deploy/base/` holds the kustomize
 package for aks-obs-01 (namespace `loop-closer`, CNPG cluster `loopcloser-db`, API

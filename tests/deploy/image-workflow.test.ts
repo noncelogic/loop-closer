@@ -1,7 +1,7 @@
 // LC-D1b acceptance: on merge to main, .github/workflows/estate-image.yml
 // builds the loopcloser image and pushes it, tagged sha-<commit>, to the
-// estate registry that aks-obs-01 pulls from. Since LC-ESTATE-IMAGE-RUNNER it
-// runs on a GitHub-hosted runner (tests/ci/estate-image-workflow.test.ts); since
+// estate registry that aks-obs-01 pulls from. Since LC-EST-PUBLISH-RUNNER it
+// runs on the ARC org scale set [self-hosted, aks] (tests/workflows/runners.test.ts); since
 // LC-EST-IMAGE-PUBLISH it logs in to the registry with loop-closer's push
 // credential from OpenBao, never repository secrets. Static check of the
 // workflow file: nothing here runs a build, reaches a registry or reads a

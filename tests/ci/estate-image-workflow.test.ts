@@ -6,9 +6,12 @@
 // (meta-harness devops/aks/ci-runners/README.md); estate-image runs that asked
 // for it never started (run 44147944903 queued from 2026-11-17T18:26Z, later
 // runs cancelled behind it in the `estate-image` concurrency group).
-// loop-closer has no self-hosted runner of its own, so its workflows run on
-// GitHub-hosted runners, as ci.yml does. Static check of the workflow files:
-// nothing here reaches GitHub, a runner or a registry.
+// Since LC-EST-PUBLISH-RUNNER every loop-closer job runs on the ARC org scale
+// set noncelogic-org (runs-on [self-hosted, aks]), which serves every private
+// noncelogic repo and reaches the estate OpenBao; GitHub-hosted runners are
+// against policy no-github-hosted-runners (tests/workflows/runners.test.ts).
+// Static check of the workflow files: nothing here reaches GitHub, a runner or
+// a registry.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
@@ -25,10 +28,10 @@ type Obj = Record<string, any>;
 
 // Runner labels registered only for another repository's runners. A job that
 // asks for any of them never starts in loop-closer.
-const OTHER_REPO_ONLY_LABELS = ["passband-ci", "aks"];
+const OTHER_REPO_ONLY_LABELS = ["passband-ci"];
 
-// GitHub-hosted Linux labels: available to every repository in the org.
-const GITHUB_HOSTED_LINUX = /^ubuntu-(latest|\d{2}\.04)(-arm)?$/;
+// The ARC org scale set noncelogic-org: available to every private noncelogic repository.
+const ORG_SCALE_SET = ["self-hosted", "aks"];
 
 function load(file: string): Obj {
   return parse(readFileSync(join(WORKFLOWS, file), "utf8")) as Obj;
@@ -48,9 +51,8 @@ function unavailable(job: Obj): string | null {
     if (l.includes("${{")) return `label ${l} is computed`;
     if (OTHER_REPO_ONLY_LABELS.includes(l)) return `label ${l} is registered only for another repository`;
   }
-  if (ls.includes("self-hosted")) return "loop-closer has no self-hosted runner registered";
-  if (ls.length !== 1 || !GITHUB_HOSTED_LINUX.test(String(ls[0]))) {
-    return `runs-on ${JSON.stringify(job["runs-on"])} is not a single GitHub-hosted Linux label`;
+  if (ls.length !== ORG_SCALE_SET.length || ORG_SCALE_SET.some((l, i) => ls[i] !== l)) {
+    return `runs-on ${JSON.stringify(job["runs-on"])} is not the org scale set ${JSON.stringify(ORG_SCALE_SET)}`;
   }
   return null;
 }
@@ -90,11 +92,12 @@ test("a job that targets a runner label registered only for another repository i
     ["self-hosted", "linux"],
     "${{ vars.RUNNER }}",
     ["ubuntu-latest", "passband-ci"],
+    "ubuntu-latest",
+    "ubuntu-24.04",
   ]) {
     assert.notEqual(unavailable({ "runs-on": runsOn }), null, `runs-on ${JSON.stringify(runsOn)} is rejected`);
   }
-  assert.equal(unavailable({ "runs-on": "ubuntu-latest" }), null);
-  assert.equal(unavailable({ "runs-on": "ubuntu-24.04" }), null);
+  assert.equal(unavailable({ "runs-on": ["self-hosted", "aks"] }), null);
 });
 
 // LC-EST-IMAGE-PUBLISH acceptance: the publish job logs in to the estate
