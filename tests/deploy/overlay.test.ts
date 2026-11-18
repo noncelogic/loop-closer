@@ -240,6 +240,30 @@ test("the listings-read CronJob runs the portal-read entrypoint with listing URL
   assert.ok(validated.includes(`ConfigMap ${LISTINGS_PAGES}`), "the listing pages ConfigMap is schema-validated");
 });
 
+// LC-EST-PORTAL-NOFIXTURE acceptance: PR #57 shipped the listings-read
+// ConfigMap with two fixture listing URLs; the rendered overlay carries
+// neither of them, nor any other URL on a reserved fixture domain.
+const PR57_FIXTURE_URLS = [
+  "https://listings.example.invalid/rove-connector",
+  "https://listings.example.invalid/rove-plugin",
+];
+
+test("the aks-obs-01 overlay renders the listings-read CronJob without the PR 57 fixture URLs", () => {
+  const rendered = kustomizeBuild(OVERLAY);
+  const objs = parseObjects(rendered);
+  const cron = one(objs, "CronJob", LISTINGS_READ);
+  assert.equal(cron["spec"]["suspend"], true, "the listings-read CronJob stays suspended");
+  const ref = (soleContainer(cron)["env"] as Obj[]).find((e) => e["name"] === PUBLIC_LISTING_ENV.pages)?.["valueFrom"]?.["configMapKeyRef"] as Obj | undefined;
+  assert.equal(ref?.["name"], LISTINGS_PAGES, "the CronJob still references the listings ConfigMap");
+  one(objs, "ConfigMap", LISTINGS_PAGES);
+
+  for (const url of PR57_FIXTURE_URLS) assert.ok(!rendered.includes(url), `the overlay renders PR 57 fixture URL ${url}`);
+  for (const url of rendered.match(/https?:\/\/[^\s"'<>)\]\\]+/g) ?? []) {
+    const host = new URL(url).hostname;
+    assert.doesNotMatch(host, /(^|\.)(example(\.(com|org|net))?|invalid|test|localhost)$/, `fixture URL ${url}`);
+  }
+});
+
 test("the listings-read CronJob command is the build output of src/portal-read.ts in the image build, not a checked-in dist file", async () => {
   const c = soleContainer(one(render(), "CronJob", LISTINGS_READ));
   const script = (c["command"] as string[])[1]!;

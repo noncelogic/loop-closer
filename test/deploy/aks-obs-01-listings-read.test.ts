@@ -162,3 +162,29 @@ test("the aks-obs-01 listings-read CronJob reads its listing URLs only from the 
   assert.deepEqual(JSON.stringify(cron).match(URL_RE) ?? [], [], "the CronJob itself names no URL");
   one(objs, "ConfigMap", TRACKED_LISTINGS);
 });
+
+// LC-EST-PORTAL-NOFIXTURE acceptance: the suspended CronJob still takes its
+// listing URLs from the listings-read ConfigMap, and that ConfigMap holds only
+// tracked directory listing URLs (exactly those SPEC.md records), none of them
+// a fixture: empty until one is recorded.
+test("the aks-obs-01 listings-read CronJob stays suspended and references a listings ConfigMap that carries no fixture URL", () => {
+  const objs = parseObjects(kustomizeBuild(OVERLAY));
+  const cron = one(objs, "CronJob", LISTINGS_READ);
+  assert.equal(cron["spec"]["suspend"], true, "the listings-read CronJob stays suspended");
+
+  const ref = (container(cron)["env"] as Obj[]).find((e) => e["name"] === PUBLIC_LISTING_ENV.pages)?.["valueFrom"]?.["configMapKeyRef"] as Obj | undefined;
+  assert.deepEqual(ref, { name: TRACKED_LISTINGS, key: PAGES_KEY }, "the CronJob references the listings ConfigMap");
+  const cm = one(objs, "ConfigMap", ref["name"] as string);
+
+  const cmUrls = JSON.stringify(cm["data"] ?? {}).match(URL_RE) ?? [];
+  for (const url of cmUrls) assert.ok(!isFixture(url), `ConfigMap/${TRACKED_LISTINGS} carries fixture URL ${url}`);
+  const recorded = specTrackedListings();
+  const pages = JSON.parse(cm["data"][PAGES_KEY] as string) as Record<string, string>;
+  const tracked = JSON.parse(cm["data"][TRACKED_KEY] as string) as TrackedListing[];
+  assert.deepEqual(Object.values(pages).sort(), recorded.map((t) => t.url).sort(), "only tracked listing URLs");
+  assert.deepEqual(tracked.map((t) => t.url).sort(), recorded.map((t) => t.url).sort(), "only tracked listing URLs");
+  if (recorded.length === 0) {
+    assert.deepEqual(pages, {}, "empty until a listing URL is recorded");
+    assert.deepEqual(tracked, [], "empty until a listing URL is recorded");
+  }
+});
