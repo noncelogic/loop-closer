@@ -7,7 +7,7 @@
 // all-or-nothing transactions and the ledger's idempotency-key uniqueness —
 // for tests and for running without the Postgres replica.
 
-export type LoopState = "proposed" | "open" | "waiting" | "chased" | "closed" | "closed_with_reason";
+export type LoopState = "proposed" | "open" | "waiting" | "chased" | "suspended" | "closed" | "closed_with_reason";
 
 export interface PolicyRef {
   readonly id: string;
@@ -59,7 +59,10 @@ export interface DueCalendarWhen {
 }
 
 export interface TimerTx {
-  /** Lock and return active calendar Whens with next_fire_at <= now, oldest first, skipping rows another tick holds. */
+  /**
+   * Lock and return active calendar Whens with next_fire_at <= now, oldest first, skipping rows another tick holds
+   * and Whens held by a suspended loop (governed by a suspended loop and by no armed one), which stay due.
+   */
   claimDueCalendarWhens(now: Date): Promise<DueCalendarWhen[]>;
   /** Append-only; rejects a duplicate idempotency key. */
   appendLedgerEvent(event: LedgerEvent): Promise<void>;
@@ -73,10 +76,16 @@ export interface TimerStore {
   transaction<T>(fn: (tx: TimerTx) => Promise<T>): Promise<T>;
 }
 
+/** A loop as the in-memory store holds it: its ageing slice plus the Whens it governs. */
+export interface TimerLoopRow extends LoopAgeingRow {
+  /** Member and closing When ids; a suspended loop holds these unless an armed loop also governs them. */
+  when_ids?: string[];
+}
+
 export interface TimerState {
   nodes: NodeRecord[];
   ledger: LedgerEvent[];
-  loops: LoopAgeingRow[];
+  loops: TimerLoopRow[];
   ageing_policies: AgeingPolicy[];
 }
 
@@ -118,12 +127,22 @@ export class InMemoryTimerStore implements TimerStore {
 }
 
 const CLOSED: ReadonlySet<LoopState> = new Set(["closed", "closed_with_reason"]);
+const ARMED: ReadonlySet<LoopState> = new Set(["open", "waiting", "chased"]);
+
+/** Whens governed by a suspended loop and by no armed loop. */
+function heldWhenIds(loops: readonly TimerLoopRow[]): Set<string> {
+  const held = new Set(loops.filter((l) => l.state === "suspended").flatMap((l) => l.when_ids ?? []));
+  for (const l of loops) if (ARMED.has(l.state)) for (const id of l.when_ids ?? []) held.delete(id);
+  return held;
+}
 
 function memoryTx(state: TimerState): TimerTx {
   return {
     async claimDueCalendarWhens(now) {
+      const held = heldWhenIds(state.loops);
       return state.nodes
         .filter((n) => n.kind === "when" && n.status === "active" && n.attributes["when_type"] === "calendar")
+        .filter((n) => !held.has(n.id))
         .filter((n) => typeof n.attributes["next_fire_at"] === "string" && Date.parse(n.attributes["next_fire_at"]) <= now.getTime())
         .map((n) => ({
           id: n.id,
@@ -148,7 +167,7 @@ function memoryTx(state: TimerState): TimerTx {
     async listOpenLoopsForAgeing() {
       return state.loops
         .filter((l) => !CLOSED.has(l.state))
-        .map((loop) => ({
+        .map(({ when_ids: _whenIds, ...loop }) => ({
           loop: structuredClone(loop),
           policy:
             structuredClone(

@@ -229,3 +229,26 @@ test("recurrence keeps local wall-clock time across a DST change", () => {
   const until = nextFireAt({ rrule: "FREQ=DAILY;UNTIL=20261110T000000Z" }, "UTC", new Date("2026-11-09T08:00:00Z"), new Date("2026-11-09T08:00:00Z"));
   assert.equal(until.next, null);
 });
+
+// LC-CP-SUSPEND: a calendar When governed only by suspended loops is held (not
+// claimed, still due); one an armed loop also governs keeps firing.
+test("a calendar When held by a suspended loop is not claimed until the loop resumes", async () => {
+  const state = seed();
+  const policy = { id: "lc_policy_ageing_outreach", version: 1 };
+  state.loops.push(
+    { id: "lc_loop_paused", loop_type: "outreach", state: "suspended", state_entered_at: "2026-11-08T12:00:00Z", ageing_policy: policy, when_ids: ["lc_when_daily", "lc_when_review"] },
+    { id: "lc_loop_sharing", loop_type: "outreach", state: "chased", state_entered_at: "2026-11-09T12:00:00Z", ageing_policy: policy, when_ids: ["lc_when_review"] },
+  );
+  const newId = idGen();
+  const store = new InMemoryTimerStore(state);
+  const report = await runTick(store, { now: NOW, newId });
+  assert.deepEqual(report.fired.map((f) => f.when_id).sort(), ["lc_when_deadline", "lc_when_review"]);
+  assert.equal(when(store, "lc_when_daily")["next_fire_at"], "2026-11-06T08:00:00Z", "held slot stays due");
+
+  const resumed = store.snapshot();
+  resumed.loops = resumed.loops.map((l) => (l.id === "lc_loop_paused" ? { ...l, state: "open" } : l));
+  const after = new InMemoryTimerStore(resumed);
+  const next = await runTick(after, { now: NOW, newId });
+  assert.deepEqual(next.fired.map((f) => f.when_id), ["lc_when_daily"]);
+  assert.deepEqual((await runTick(after, { now: NOW, newId })).fired, [], "fires once");
+});

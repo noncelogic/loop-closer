@@ -120,19 +120,24 @@ const DEFAULT_POLICY_REFS = {
   escalation: { id: "lc_policy_escalation_default", version: 1 },
 } as const;
 
-/** Loop states whose Whens are armed (accepted and not closed). */
+/** Loop states whose Whens are armed (accepted, not suspended and not closed). */
 const ARMED: ReadonlySet<LoopState> = new Set(["open", "waiting", "chased"]);
+/** The non-terminal paused state: neither armed nor closed; left only back to open. */
+const SUSPENDED: LoopState = "suspended";
 const CLOSED: ReadonlySet<LoopState> = new Set(["closed", "closed_with_reason"]);
 
 /**
  * Valid manual transitions. `proposed` leaves only via accept_loop / reject_loop;
  * closed states are terminal (re-opening is a new loop or a manual_correction).
+ * `suspended` pauses an open loop (its Whens are held, see #heldWhenIds) and
+ * resumes only to open.
  */
 export const LOOP_TRANSITIONS: Readonly<Record<LoopState, readonly LoopState[]>> = {
   proposed: [],
-  open: ["waiting", "chased", "closed", "closed_with_reason"],
+  open: ["waiting", "chased", "suspended", "closed", "closed_with_reason"],
   waiting: ["open", "chased", "closed", "closed_with_reason"],
   chased: ["open", "waiting", "closed", "closed_with_reason"],
+  suspended: ["open"],
   closed: [],
   closed_with_reason: [],
 };
@@ -371,7 +376,9 @@ export class Kernel {
    * event_type + source, a When with a change_condition fires only when the
    * payload's value of its field differs from the value at its last firing (the
    * first observation always fires); the ledger event lists it under
-   * unchanged_when_ids instead of when_ids. A replayed idempotency key applies once. Workflow runs arrive with templates.
+   * unchanged_when_ids instead of when_ids. A When held by a suspended loop
+   * (see #heldWhenIds) does not fire: by event_type + source it is listed under
+   * held_when_ids instead of when_ids; by id the firing is refused. A replayed idempotency key applies once. Workflow runs arrive with templates.
    */
   fireEvent(input: FireEventInput): Promise<FireEventResult> {
     return this.#store.transaction(async (tx) => {
@@ -386,6 +393,8 @@ export class Kernel {
       if ("when_id" in input) {
         const when = await tx.getNode(input.when_id);
         if (!when || when.kind !== "when") throw new KernelError("not_found", `When ${input.when_id} does not exist`);
+        if ((await this.#heldWhenIds(tx)).has(when.id))
+          throw new KernelError("conflict", `When ${when.id} is held: every loop it belongs to is suspended`);
         whens = [when];
       } else {
         whens = (await tx.listNodes()).filter((n) => {
@@ -402,8 +411,12 @@ export class Kernel {
         }
       }
 
-      // A change-condition When fires (by event_type + source) only on a new value of its field.
-      const matched = whens;
+      // A When held by a suspended loop does not fire; a change-condition When
+      // fires (by event_type + source) only on a new value of its field.
+      const heldIds = await this.#heldWhenIds(tx);
+      const bound = whens;
+      const held = bound.filter((w) => heldIds.has(w.id));
+      const matched = bound.filter((w) => !heldIds.has(w.id));
       const unchanged: Node[] = [];
       if ("event_type" in input) {
         whens = matched.filter((w) => {
@@ -433,13 +446,14 @@ export class Kernel {
       const loopIds = [...new Set(effects.map((e) => e.loop_id))];
       const payload: Record<string, unknown> = { when_ids: whens.map((w) => w.id), loop_ids: loopIds };
       if (unchanged.length > 0) payload["unchanged_when_ids"] = unchanged.map((w) => w.id);
+      if (held.length > 0) payload["held_when_ids"] = held.map((w) => w.id);
       if ("event_type" in input) Object.assign(payload, { event_type: input.event_type, source: input.source });
       if (input.payload !== undefined) payload["event_payload"] = input.payload;
       const ledger_event = await this.#append(tx, {
         at,
         actor,
         event_type: "when_fired",
-        subject_ids: [...matched.map((w) => w.id), ...loopIds],
+        subject_ids: [...bound.map((w) => w.id), ...loopIds],
         payload,
         idempotency_key: input.idempotency_key,
       });
@@ -728,6 +742,22 @@ export class Kernel {
     for (const id of loop.member_node_ids) if ((await tx.getNode(id))?.kind === "when") ids.push(id);
     if (loop.closing_when_id !== null && !ids.includes(loop.closing_when_id)) ids.push(loop.closing_when_id);
     return ids;
+  }
+
+  /**
+   * Whens held by a suspended loop: governed by (a member or the closing When
+   * of) at least one suspended loop and by no armed loop. A held When does not
+   * fire; the timer stores apply the same rule to calendar Whens.
+   */
+  async #heldWhenIds(tx: GraphTx): Promise<Set<string>> {
+    const suspended = new Set<string>();
+    const armed = new Set<string>();
+    for (const l of await tx.listLoops()) {
+      const into = l.state === SUSPENDED ? suspended : ARMED.has(l.state) ? armed : undefined;
+      if (into) for (const id of await this.#whenIds(tx, l)) into.add(id);
+    }
+    for (const id of armed) suspended.delete(id);
+    return suspended;
   }
 
   async #effectsOfWhen(tx: GraphTx, whenId: string): Promise<FiringEffect[]> {

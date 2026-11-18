@@ -65,7 +65,7 @@
       }
     },
     {
-      "if": { "properties": { "state": { "enum": ["proposed", "open", "waiting", "chased"] } }, "required": ["state"] },
+      "if": { "properties": { "state": { "enum": ["proposed", "open", "waiting", "chased", "suspended"] } }, "required": ["state"] },
       "then": { "properties": { "close_reason": { "type": "null" }, "closed_at": { "type": "null" } } }
     },
     {
@@ -74,7 +74,10 @@
     }
   ],
   "$defs": {
-    "loop_state": { "enum": ["proposed", "open", "waiting", "chased", "closed", "closed_with_reason"] },
+    "loop_state": {
+      "description": "suspended = paused, not closed: its Whens are held (not armed) until a transition resumes it to open.",
+      "enum": ["proposed", "open", "waiting", "chased", "suspended", "closed", "closed_with_reason"]
+    },
     "close_reason": {
       "description": "rejected = closed at intake by reject_loop.",
       "enum": ["abandoned", "superseded", "no-longer-applies", "rejected"]

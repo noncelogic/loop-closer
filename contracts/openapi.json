@@ -3,7 +3,7 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Loop Closer API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "SPEC B3 operation set for the loopcloser service. Domain objects are the SPEC B2 JSON Schemas under contracts/schemas/v1/, referenced by $id; tests/contracts/ keeps this document and those schemas in agreement. The MCP adapter maps tools 1:1 onto these operationIds."
   },
   "servers": [
@@ -343,7 +343,8 @@
                 "proposed",
                 "open",
                 "waiting",
-                "chased"
+                "chased",
+                "suspended"
               ]
             }
           },

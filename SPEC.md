@@ -188,7 +188,7 @@ Any node → any node, typed, with causality as a first-class type.
 ### B2.3 Loop
 A Loop is a named subgraph plus a state record. The subgraph is the truth; the record is its handle.
 - `id`, `name`, `loop_type` (publishing | outreach | deploy-watch | objective-tracking | grant | errand | … — new types are data)
-- `state`: proposed | open | waiting | chased | closed | closed_with_reason (abandoned / superseded / no-longer-applies) — transitions only via `transition` (B3), each writing a ledger event
+- `state`: proposed | open | waiting | chased | suspended | closed | closed_with_reason (abandoned / superseded / no-longer-applies) — transitions only via `transition` (B3), each writing a ledger event. `suspended` pauses a loop without closing it: entered from open and left only back to open; while suspended its Whens are not armed (the tick does not fire its calendar Whens and `fire_event` does not fire its event Whens, unless an armed loop also governs them), and a held calendar slot stays due, so it fires once when the loop resumes (LC-CP-SUSPEND)
 - `accountable_who_id` → Who (who owes the next move)
 - `member_node_ids[]` — the subgraph: the Whos, Whats, Whens and the edges between them
 - `closing_when_id` → When whose firing closes (or is a condition of closing) the loop
