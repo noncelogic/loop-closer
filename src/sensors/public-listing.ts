@@ -1,9 +1,9 @@
 // The public directory listings reader: the `read` behind the
 // anthropic_listings PortalReadSource (sources.ts). For each tracked listing it
 // makes one anonymous GET of that listing's public directory page (the URL per
-// listing comes from configuration) and turns the page into a
-// PortalObservation: subject = the listing, status = whether it is live, fields
-// = the public metadata the page carries.
+// listing comes from its When's source binding in the graph, listing-targets.ts)
+// and turns the page into a PortalObservation: subject = the listing, status =
+// whether it is live, fields = the public metadata the page carries.
 //
 // No credential is configured, sent or stored, and no portal is logged in to:
 // the request carries no Authorization header and omits cookies. A listing
@@ -12,12 +12,6 @@
 // cannot be read (network failure, any other non-2xx) fails the whole read, so
 // the sensor records no heartbeat rather than mistaking an outage for a change.
 import type { PortalObservation } from "./sources.ts";
-
-/** The environment variable that configures the reader. */
-export const PUBLIC_LISTING_ENV = {
-  /** JSON object mapping each tracked listing to its public directory page URL. */
-  pages: "LISTINGS_DIRECTORY_PAGES",
-} as const;
 
 /** The status of a listing whose public directory page is there. */
 export const LIVE = "live";
@@ -34,42 +28,21 @@ export interface PublicListingConfig {
 }
 
 /**
- * The reader's configuration from the environment; undefined when no listing
- * is tracked (the sensor is then not run).
+ * A listing's public page URL, checked: absolute http(s), with no userinfo (a
+ * credential has no place in it). Throws naming the listing otherwise.
  */
-export function loadPublicListingConfig(env: NodeJS.ProcessEnv = process.env): PublicListingConfig | undefined {
-  const raw = env[PUBLIC_LISTING_ENV.pages];
-  if (raw === undefined || raw.trim() === "") return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`${PUBLIC_LISTING_ENV.pages} is not valid JSON`);
-  }
-  if (!isRecord(parsed)) throw new Error(`${PUBLIC_LISTING_ENV.pages} must be a JSON object of listing → page URL`);
-  const listings: PublicListing[] = [];
-  for (const [subject, url] of Object.entries(parsed)) {
-    if (subject === "") throw new Error(`${PUBLIC_LISTING_ENV.pages} has an empty listing name`);
-    if (typeof url !== "string") throw new Error(`${PUBLIC_LISTING_ENV.pages}: the page for ${subject} is not a string`);
-    listings.push({ subject, url: publicPageUrl(subject, url) });
-  }
-  if (listings.length === 0) return undefined;
-  return { listings };
-}
-
-/** A public page URL: absolute http(s), with no userinfo (a credential has no place in it). */
-function publicPageUrl(subject: string, url: string): string {
+export function publicPageUrl(subject: string, url: string): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error(`${PUBLIC_LISTING_ENV.pages}: the page for ${subject} is not a valid URL`);
+    throw new Error(`the page for listing ${subject} is not a valid URL`);
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`${PUBLIC_LISTING_ENV.pages}: the page for ${subject} is not an http(s) URL`);
+    throw new Error(`the page for listing ${subject} is not an http(s) URL`);
   }
   if (parsed.username || parsed.password) {
-    throw new Error(`${PUBLIC_LISTING_ENV.pages}: the page for ${subject} carries credentials; only public pages are read`);
+    throw new Error(`the page for listing ${subject} carries credentials; only public pages are read`);
   }
   return url;
 }
@@ -202,10 +175,6 @@ function decodeEntities(text: string): string {
     }
     return NAMED_ENTITIES[ref.toLowerCase()] ?? whole;
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function message(err: unknown): string {

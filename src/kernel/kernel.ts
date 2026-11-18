@@ -121,7 +121,8 @@ const DEFAULT_POLICY_REFS = {
 } as const;
 
 /** Loop states whose Whens are armed (accepted, not suspended and not closed). */
-const ARMED: ReadonlySet<LoopState> = new Set(["open", "waiting", "chased"]);
+export const ARMED_LOOP_STATES: ReadonlySet<LoopState> = new Set(["open", "waiting", "chased"]);
+const ARMED = ARMED_LOOP_STATES;
 /** The non-terminal paused state: neither armed nor closed; left only back to open. */
 const SUSPENDED: LoopState = "suspended";
 const CLOSED: ReadonlySet<LoopState> = new Set(["closed", "closed_with_reason"]);

@@ -12,11 +12,10 @@ import {
   LISTING_STATUS_CHANGED,
   ListingReadError,
   NOT_LISTED,
-  PUBLIC_LISTING_ENV,
   PortalReadSource,
   PublicListingReader,
   SensorFramework,
-  loadPublicListingConfig,
+  publicPageUrl,
   type PortalObservation,
 } from "../../src/sensors/index.ts";
 
@@ -385,12 +384,11 @@ function directory(pages: Record<string, () => Response | Promise<Response>>) {
 const html = (body: string) => () => new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 
 test("a public listing page read records status and metadata fields with no credential configured", async () => {
-  // Configuration is a URL per listing and nothing else: there is no credential to configure.
-  const config = loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: JSON.stringify({ "rove-connector": ROVE_PAGE }) });
-  assert.deepEqual(config, { listings: [{ subject: "rove-connector", url: ROVE_PAGE }] });
+  // A target is a listing and its public page URL and nothing else: there is no credential to configure.
+  const config = { listings: [{ subject: "rove-connector", url: publicPageUrl("rove-connector", ROVE_PAGE) }] };
 
   const { fetch, requests } = directory({ [ROVE_PAGE]: html(ROVE_HTML) });
-  const reader = new PublicListingReader({ ...config!, fetch });
+  const reader = new PublicListingReader({ ...config, fetch });
 
   const observations = await reader.read();
   assert.deepEqual(observations, [

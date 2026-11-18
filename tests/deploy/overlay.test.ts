@@ -16,7 +16,6 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { kustomizeBuild, parseObjects, repoRoot, SCHEMA_DIR, validate, type Obj } from "./manifest-check.ts";
 import { buildEntrypoints, manifestScriptIn } from "../support/entrypoint-build.ts";
-import { loadPublicListingConfig, PUBLIC_LISTING_ENV } from "../../src/sensors/public-listing.ts";
 
 const OVERLAY = join(repoRoot, "deploy", "overlays", "aks-obs-01");
 const NAMESPACE = "loop-closer";
@@ -26,7 +25,6 @@ const API = "loopcloser";
 const SCHEMA_JOB = "loopcloser-schema";
 const PULL_SECRET = "loopcloser-registry-pull";
 const LISTINGS_READ = "loopcloser-listings-read";
-const LISTINGS_PAGES = "loopcloser-listings-pages";
 // .github/workflows/estate-image.yml pushes `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>`.
 const ESTATE_IMAGE = /^(?<repo>[a-z0-9.-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)*\/loopcloser):sha-(?<sha>[0-9a-f]{40})$/;
 
@@ -188,7 +186,7 @@ test("the rendered aks-obs-01 overlay passes the offline schema check including 
 // (SPEC.md names the listings only, with no URL under LC-EST-PORTAL-URLS), so
 // the ConfigMap tracks none (LC-EST-PORTAL-LISTINGS-NOFIX and
 // LC-EST-PORTAL-LISTINGS-URLS, test/deploy/aks-obs-01-listings-read.test.ts).
-test("the listings-read CronJob runs the portal-read entrypoint with listing URLs from its ConfigMap and mounts no credential", () => {
+test("the listings-read CronJob runs the portal-read entrypoint with only the graph's DATABASE_URL and mounts no credential", () => {
   const objs = render();
   const cron = one(objs, "CronJob", LISTINGS_READ);
   const api = one(objs, "Deployment", API);
@@ -204,14 +202,10 @@ test("the listings-read CronJob runs the portal-read entrypoint with listing URL
   assert.equal(c["args"], undefined);
   assert.equal(c["image"], soleContainer(api)["image"], "the API's pinned image");
 
-  // DATABASE_URL from the CNPG app URI and the pages from the ConfigMap; nothing else.
+  // DATABASE_URL from the CNPG app URI; nothing else.
   const env = new Map((c["env"] as Obj[]).map((e) => [e["name"] as string, e]));
-  assert.deepEqual([...env.keys()].sort(), ["DATABASE_URL", PUBLIC_LISTING_ENV.pages].sort());
+  assert.deepEqual([...env.keys()], ["DATABASE_URL"]);
   assert.deepEqual(env.get("DATABASE_URL")!["valueFrom"], { secretKeyRef: { name: DB_SECRET, key: "uri" } });
-  const ref = env.get(PUBLIC_LISTING_ENV.pages)!["valueFrom"]?.["configMapKeyRef"] as Obj | undefined;
-  assert.ok(ref, `${PUBLIC_LISTING_ENV.pages} comes from a ConfigMap`);
-  assert.equal(ref["name"], LISTINGS_PAGES);
-  assert.notEqual(ref["optional"], true, "a missing ConfigMap fails the Pod, not the read");
 
   // No credential: no volumes or mounts, no envFrom, no ServiceAccount token,
   // and the database URI is the only Secret referenced.
@@ -222,27 +216,16 @@ test("the listings-read CronJob runs the portal-read entrypoint with listing URL
   const secretRefs = (c["env"] as Obj[]).flatMap((e) => (e["valueFrom"]?.["secretKeyRef"] ? [e["valueFrom"]["secretKeyRef"]] : []));
   assert.deepEqual(secretRefs, [{ name: DB_SECRET, key: "uri" }], "only the database URI Secret");
 
-  // The ConfigMap holds the tracked listings SPEC.md records under
-  // LC-EST-PORTAL-URLS (with source page and read date) and their projection
-  // the reader parses; none is recorded yet, so no listing is tracked.
-  const cm = one(objs, "ConfigMap", LISTINGS_PAGES);
-  assert.equal(cm["metadata"]["namespace"], NAMESPACE);
-  assert.deepEqual(Object.keys(cm["data"] ?? {}).sort(), [ref["key"] as string, "tracked-listings.json"].sort());
-  const raw = cm["data"]?.[ref["key"] as string] as string | undefined;
-  assert.ok(raw, `ConfigMap/${LISTINGS_PAGES} carries key ${ref["key"]}`);
-  assert.deepEqual(JSON.parse(cm["data"]["tracked-listings.json"] as string), [], "no tracked listing recorded");
-  assert.equal(loadPublicListingConfig({ [PUBLIC_LISTING_ENV.pages]: raw }), undefined, "no listing tracked yet");
-
   // Syncs after the schema Job, like the other database readers.
   assert.ok(wave(cron) > wave(job), `the listings read (wave ${wave(cron)}) syncs after the schema Job (wave ${wave(job)})`);
   const validated = validate(kustomizeBuild(OVERLAY)).map((o) => `${o["kind"]} ${o["metadata"]?.["name"]}`);
   assert.ok(validated.includes(`CronJob ${LISTINGS_READ}`), "the listings-read CronJob is schema-validated");
-  assert.ok(validated.includes(`ConfigMap ${LISTINGS_PAGES}`), "the listing pages ConfigMap is schema-validated");
 });
 
 // LC-EST-PORTAL-NOFIXTURE acceptance: PR #57 shipped the listings-read
 // ConfigMap with two fixture listing URLs; the rendered overlay carries
-// neither of them, nor any other URL on a reserved fixture domain.
+// neither of them, nor any other URL on a reserved fixture domain (and, since
+// LC-SENSE-LISTING-BINDINGS, no listings ConfigMap at all).
 const PR57_FIXTURE_URLS = [
   "https://listings.example.invalid/rove-connector",
   "https://listings.example.invalid/rove-plugin",
@@ -253,9 +236,6 @@ test("the aks-obs-01 overlay renders the listings-read CronJob without the PR 57
   const objs = parseObjects(rendered);
   const cron = one(objs, "CronJob", LISTINGS_READ);
   assert.equal(cron["spec"]["suspend"], true, "the listings-read CronJob stays suspended");
-  const ref = (soleContainer(cron)["env"] as Obj[]).find((e) => e["name"] === PUBLIC_LISTING_ENV.pages)?.["valueFrom"]?.["configMapKeyRef"] as Obj | undefined;
-  assert.equal(ref?.["name"], LISTINGS_PAGES, "the CronJob still references the listings ConfigMap");
-  one(objs, "ConfigMap", LISTINGS_PAGES);
 
   for (const url of PR57_FIXTURE_URLS) assert.ok(!rendered.includes(url), `the overlay renders PR 57 fixture URL ${url}`);
   for (const url of rendered.match(/https?:\/\/[^\s"'<>)\]\\]+/g) ?? []) {
