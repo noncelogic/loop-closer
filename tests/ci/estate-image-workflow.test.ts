@@ -421,3 +421,66 @@ test("the pull-request dry run fails naming the missing input when the registry 
     rmSync(docker.dir, { recursive: true, force: true });
   }
 });
+
+// LC-EST-BASE-FROM-ACR acceptance: the publish pulled node:24-bookworm-slim
+// anonymously from registry-1.docker.io and got 429 Too Many Requests (run
+// 44531071209; every aks-ci-01 node shares one egress IP). The Dockerfile
+// takes its node base from ARG NODE_IMAGE (default node:24-bookworm-slim) for
+// both stages; the publish, already logged in to ESTATE_REGISTRY, builds with
+// NODE_IMAGE=<ESTATE_REGISTRY>/node:24-bookworm-slim (the estate ACR cache rule
+// for node), while ci's estate-image-dry-run, holding no registry credential,
+// keeps the default. Rule: policies/placement-defaults.yaml#estate.
+const DEFAULT_NODE_IMAGE = "node:24-bookworm-slim";
+
+/** The build-args of a build-push step as NAME -> value. */
+function buildArgs(step: Obj): Map<string, string> {
+  const raw = (step["with"] as Obj | undefined)?.["build-args"];
+  const out = new Map<string, string>();
+  if (raw === undefined) return out;
+  for (const line of String(raw).split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const eq = line.indexOf("=");
+    assert.ok(eq > 0, `build-arg ${line} is NAME=value`);
+    out.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+  return out;
+}
+
+function buildPushStep(job: Obj): Obj {
+  const steps = (job["steps"] ?? []) as Obj[];
+  const found = steps.filter((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
+  assert.equal(found.length, 1, "the job has exactly one build-push step");
+  return found[0]!;
+}
+
+test("the publish builds with NODE_IMAGE set to the ESTATE_REGISTRY node image and the dry run uses the Dockerfile default", () => {
+  // Every FROM in the Dockerfile is the NODE_IMAGE arg, declared before the
+  // first FROM with the Docker Hub default.
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  const lines = dockerfile.split("\n");
+  const froms = lines.map((l, i) => [l, i] as const).filter(([l]) => /^FROM\s/i.test(l));
+  assert.equal(froms.length, 2, "build and runtime stages");
+  const argIdx = lines.findIndex((l) => l.trim() === `ARG NODE_IMAGE=${DEFAULT_NODE_IMAGE}`);
+  assert.ok(argIdx >= 0 && argIdx < froms[0]![1], `ARG NODE_IMAGE=${DEFAULT_NODE_IMAGE} precedes the first FROM`);
+  for (const [l] of froms) {
+    assert.match(l, /^FROM \$\{NODE_IMAGE\}( AS \w+)?$/, `${l} uses NODE_IMAGE`);
+  }
+
+  // The publish: base from the estate registry cache, already logged in.
+  const publish = (load("estate-image.yml")["jobs"] as Obj)["publish"] as Obj;
+  const args = buildArgs(buildPushStep(publish));
+  assert.equal(args.get("NODE_IMAGE"), `\${{ vars.ESTATE_REGISTRY }}/${DEFAULT_NODE_IMAGE}`);
+  assert.doesNotMatch(args.get("NODE_IMAGE")!, /docker\.io/);
+
+  // The pull-request dry run holds no registry credential: no NODE_IMAGE
+  // override, so it builds from the Dockerfile default.
+  const dry = (load("ci.yml")["jobs"] as Obj)["estate-image-dry-run"] as Obj;
+  assert.ok(!buildArgs(buildPushStep(dry)).has("NODE_IMAGE"), "the dry run keeps the Dockerfile default");
+  assert.ok(!/ESTATE_REGISTRY|secrets\./.test(JSON.stringify(dry)), "the dry run reads no registry variable or secret");
+});
+
+test("a publish that resolves the node base from Docker Hub is caught", () => {
+  for (const raw of [undefined, "NODE_IMAGE=node:24-bookworm-slim", "NODE_IMAGE=docker.io/library/node:24-bookworm-slim", "OTHER=x"]) {
+    const step = { uses: "docker/build-push-action@v6", with: raw === undefined ? {} : { "build-args": raw } };
+    assert.notEqual(buildArgs(step).get("NODE_IMAGE"), `\${{ vars.ESTATE_REGISTRY }}/${DEFAULT_NODE_IMAGE}`, `${raw} is rejected`);
+  }
+});
