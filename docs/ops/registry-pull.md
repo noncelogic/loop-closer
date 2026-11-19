@@ -8,6 +8,13 @@ ClusterSecretStore and renders it as a `kubernetes.io/dockerconfigjson`
 Secret. This page records where that credential lives in OpenBao and how it is
 written (LC-D1b-PULL-CRED).
 
+The registry is the one `.github/workflows/estate-image.yml` pushes the image
+to: the repository variable `ESTATE_REGISTRY`, `noncelogicci.azurecr.io`
+(docs/ops/estate-image.md). The aks-obs-01 overlay pulls
+`noncelogicci.azurecr.io/loopcloser`; a credential for any other registry
+would leave the cluster pulling from a registry the image is not in
+(LC-EST-PULL-REGISTRY, `tests/deploy/estate-registry.test.ts`).
+
 `tests/deploy/registry-pull-secret.test.ts` checks that the KV path and the
 property names below are exactly the ones the ExternalSecret reads.
 
@@ -18,8 +25,10 @@ Policy `policies/placement-defaults.yaml#credentials` (and
 
 - **Per product.** This credential is loop-closer's alone. It is never shared
   with another product and never reuses another product's path or token.
-- **Pull-only.** A GHCR token with the `read:packages` scope only; no
-  `write:packages`, `delete:packages` or repository scopes.
+- **Pull-only.** An ACR repository-scoped token on the estate registry whose
+  scope map grants `content/read` on repository `loopcloser` only; no
+  `content/write`, `content/delete` or `metadata/write`, and no other
+  repository.
 - **Under the product's path**, following the `kv/passband/ghcr-pull`
   pattern: `kv/<product>/registry-pull`, here `kv/loopcloser/registry-pull`.
 - **Created by the DevOps route without an ask.** It is a pipeline credential.
@@ -38,9 +47,9 @@ Policy `policies/placement-defaults.yaml#credentials` (and
 
 | Property | Holds |
 | --- | --- |
-| `registry` | Registry host the image is pulled from (`ghcr.io`); the key under `auths` in the rendered `.dockerconfigjson` |
-| `username` | GitHub account that owns the pull-only token |
-| `password` | The `read:packages` GHCR token |
+| `registry` | Registry host the image is pulled from (`noncelogicci.azurecr.io`), the `ESTATE_REGISTRY` the publish job pushes to; the key under `auths` in the rendered `.dockerconfigjson` |
+| `username` | Name of the pull-only ACR repository-scoped token |
+| `password` | That token's password (`content/read` on `loopcloser` only) |
 
 The ExternalSecret reads each property by name; any other property at the path
 is ignored, and a missing one leaves the Secret unsynced.
@@ -66,13 +75,13 @@ and the AppRole token does not outlive it:
     || { echo 'AppRole login returned no token; nothing written' >&2; exit 1; }
   export BAO_TOKEN
 
-  # GitHub account that owns the pull-only token.
-  GHCR_PULL_USER='<github-user>'
+  # Name of the pull-only ACR repository-scoped token (content/read on loopcloser).
+  ACR_PULL_TOKEN_NAME='<token-name>'
 
-  # Read the read:packages token without echo, then write it from stdin.
-  read -rs GHCR_PULL_TOKEN
-  printf '%s' "$GHCR_PULL_TOKEN" | bao kv put -mount=kv loopcloser/registry-pull \
-    registry=ghcr.io username="$GHCR_PULL_USER" password=-
+  # Read the token's password without echo, then write it from stdin.
+  read -rs ACR_PULL_PASSWORD
+  printf '%s' "$ACR_PULL_PASSWORD" | bao kv put -mount=kv loopcloser/registry-pull \
+    registry=noncelogicci.azurecr.io username="$ACR_PULL_TOKEN_NAME" password=-
 )
 ```
 
@@ -93,6 +102,6 @@ Without reading any secret value:
 
 ## Rotating
 
-Write a new `read:packages` token with the same command; ESO picks it up
-within the ExternalSecret's `refreshInterval` (1h). Then revoke the old token
-on GitHub.
+Generate a new password for the ACR token and write it with the same command;
+ESO picks it up within the ExternalSecret's `refreshInterval` (1h). Then
+revoke the token's old password on the registry.

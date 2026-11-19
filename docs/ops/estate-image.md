@@ -44,7 +44,7 @@ fails with `repository variable <NAME> is not set` if any of them is empty.
 
 | Variable | Read by | Holds |
 | --- | --- | --- |
-| `ESTATE_REGISTRY` | `estate-registry-credential.mjs`, `docker/build-push-action` | Registry host aks-obs-01 pulls from; the image is pushed as `<ESTATE_REGISTRY>/loopcloser:sha-<commit>` |
+| `ESTATE_REGISTRY` | `estate-registry-credential.mjs`, `docker/build-push-action` | Registry host aks-obs-01 pulls from (`noncelogicci.azurecr.io`); the image is pushed as `<ESTATE_REGISTRY>/loopcloser:sha-<commit>`. `deploy/overlays/aks-obs-01` and `kv/loopcloser/registry-pull` (docs/ops/registry-pull.md) name this same host; `tests/deploy/estate-registry.test.ts` checks it |
 | `OPENBAO_ADDR` | `estate-registry-credential.mjs` | Estate OpenBao address the runner reaches (`https://…`, no trailing path) |
 
 ## OpenBao push credential
