@@ -77,7 +77,7 @@ test("the ops runbook's registry pull credential path and properties match the l
   // The write is the delegated OpenBao ops AppRole's, the credential is
   // pull-only, and the runbook never puts the password on a command line.
   assert.match(rb.text, /decisions-expire-with-default/, "names the delegated ops AppRole policy");
-  assert.match(rb.text, /read:packages/, "the credential is pull-only (read:packages)");
+  assert.match(rb.text, /`content\/read` on repository `loopcloser` only/, "the credential is pull-only (content/read on loopcloser)");
   assert.match(rb.text, /password=-/, "the password is read from stdin, never passed as an argument");
   assert.doesNotMatch(rb.text, /ghp_|gho_|github_pat_|[A-Za-z0-9+/]{40,}={0,2}/, "no token-shaped literal");
 });

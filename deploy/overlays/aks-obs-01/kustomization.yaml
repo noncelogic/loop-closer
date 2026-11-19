@@ -73,7 +73,9 @@ patches:
 # `<ESTATE_REGISTRY>/loopcloser:sha-<full commit sha>` that
 # .github/workflows/estate-image.yml publishes on merge to main
 # (docs/ops/estate-image.md). The registry is the one the
-# loopcloser-registry-pull credential covers (docs/ops/registry-pull.md).
+# loopcloser-registry-pull credential covers (docs/ops/registry-pull.md):
+# ESTATE_REGISTRY, noncelogicci.azurecr.io, never ghcr.io
+# (LC-EST-PULL-REGISTRY, tests/deploy/estate-registry.test.ts).
 # Until a publish run's push is verified pullable on aks-obs-01, this pins a
 # sha-<commit> tag. Promotion (LC-EST-IMAGE-READY, docs/ops/estate-image.md)
 # replaces newTag with `digest: <the sha256 the publish run pushed>` in the
@@ -82,5 +84,5 @@ patches:
 # precedes Argo CD's sync. tests/deploy/aks-obs-01-overlay.test.ts gates it.
 images:
   - name: ghcr.io/noncelogic/loop-closer
-    newName: ghcr.io/noncelogic/loopcloser
+    newName: noncelogicci.azurecr.io/loopcloser
     newTag: sha-96f1e93b7a2b3811b65ae02ad2235415aa5f9c5a

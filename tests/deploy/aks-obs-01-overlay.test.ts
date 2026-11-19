@@ -168,7 +168,7 @@ test("the image evidence check rejects a record without a matching verified pull
   // Synthetic values for the checker only; never copied into the overlay.
   const digest = `sha256:${"a".repeat(64)}`;
   const good: ImageEvidence = {
-    image: "ghcr.io/noncelogic/loopcloser",
+    image: "noncelogicci.azurecr.io/loopcloser",
     digest,
     publish: { workflow: "estate-image", job: "publish", run: 1, sourceCommit: "b".repeat(40) },
     pull: {
