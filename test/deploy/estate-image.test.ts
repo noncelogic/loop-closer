@@ -50,6 +50,62 @@ function listingsReadCommand(): string[] {
   return container["command"] as string[];
 }
 
+/** The build-args a docker/build-push-action step passes, one NAME=value per line. */
+function buildArgs(step: Obj): Record<string, string> {
+  const args: Record<string, string> = {};
+  for (const line of String(step["build-args"] ?? "").split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const eq = t.indexOf("=");
+    assert.ok(eq > 0, `build-arg line is NAME=value: ${t}`);
+    args[t.slice(0, eq)] = t.slice(eq + 1);
+  }
+  return args;
+}
+
+// An image reference: [registry[:port]/]path[:tag][@sha256:digest], lowercase path.
+const IMAGE_REF =
+  /^(?:[a-zA-Z0-9.-]+(?::[0-9]+)?\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::\w[\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+const ARG_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/**
+ * The base image of the Dockerfile's last (runtime) stage, with the ARGs
+ * declared before the first FROM resolved as `docker build` resolves them: a
+ * passed build-arg over the declared default. Throws, naming the argument,
+ * when the reference is left unresolved or resolves to a malformed reference.
+ */
+function runtimeBaseImage(dockerfile: string, args: Record<string, string>): string {
+  const lines = dockerfile.split("\n").map((l) => l.trim());
+  const isFrom = (l: string) => /^FROM\s/i.test(l);
+  const firstFrom = lines.findIndex(isFrom);
+  assert.ok(firstFrom >= 0, "the Dockerfile has a FROM");
+  const values = new Map<string, string | undefined>();
+  for (const l of lines.slice(0, firstFrom)) {
+    const m = /^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$/i.exec(l);
+    if (m) values.set(m[1]!, m[2]?.replace(/^"(.*)"$/, "$1"));
+  }
+  for (const [k, v] of Object.entries(args)) if (values.has(k)) values.set(k, v);
+  const lastFrom = lines.filter(isFrom).at(-1)!;
+  const raw = /^FROM\s+(?:--platform=\S+\s+)?(\S+)/i.exec(lastFrom)![1]!;
+  const used: string[] = [];
+  const ref = raw.replace(ARG_REF, (_, braced: string | undefined, bare: string | undefined) => {
+    const name = (braced ?? bare)!;
+    const v = values.get(name);
+    if (v === undefined || v === "") {
+      throw new Error(
+        `${name} is unresolved in the base image reference ${raw}: no ARG default before the first FROM and no build-arg`,
+      );
+    }
+    used.push(name);
+    return v;
+  });
+  if (!IMAGE_REF.test(ref)) {
+    const what = used.length ? `${used.join(", ")} resolves to` : "the base is";
+    throw new Error(`${what} a malformed image reference: ${JSON.stringify(ref)} (from ${raw})`);
+  }
+  return ref;
+}
+
 function smoke(image: string, command: string[]): { status: number | null; output: string } {
   const r = spawnSync("bash", [SMOKE, image, ...command], { cwd: repoRoot, encoding: "utf8" });
   return { status: r.status, output: `${r.stdout}${r.stderr}` };
@@ -112,10 +168,51 @@ test("the estate image built by the publish dry run starts the portal-read entry
   assert.equal(ok.status, 0, `the smoke check passes on the built image:\n${ok.output}`);
   assert.match(ok.output, /portal read failed: Error: DATABASE_URL is not set/, "the portal-read entrypoint itself ran");
 
-  // An image without the entrypoint fails the check: the base image the build
-  // starts from has node but no dist/portal-read.js.
-  const base = /^FROM\s+(\S+)\s*$/m.exec(readFileSync(join(repoRoot, "Dockerfile"), "utf8"))?.[1];
-  assert.ok(base, "the Dockerfile names its base image");
+  // An image without the entrypoint fails the check: the base image the
+  // runtime stage starts from has node but no dist/portal-read.js. NODE_IMAGE
+  // is resolved as the dry run's build resolves it (its build-args over the
+  // Dockerfile's ARG default), so the case runs a real image and fails only
+  // because the entrypoint is missing, never on an invalid reference
+  // (LC-EST-BASE-ARG-SMOKE).
+  const base = runtimeBaseImage(readFileSync(join(repoRoot, "Dockerfile"), "utf8"), buildArgs(dryBuild));
+  assert.equal(base, "node:24-bookworm-slim", "the dry run keeps the Dockerfile's default node base");
   const missing = smoke(base, command);
-  assert.notEqual(missing.status, 0, `the smoke check fails on an image without the entrypoint:\n${missing.output}`);
+  assert.equal(missing.status, 1, `the smoke check fails on an image without the entrypoint:\n${missing.output}`);
+  assert.doesNotMatch(
+    missing.output,
+    /invalid reference format|Unable to find image|pull access denied|manifest unknown/i,
+    "the base image ran: the case does not pass on an image that cannot be run",
+  );
+  assert.match(
+    missing.output,
+    /Cannot find module '\S*\/dist\/portal-read\.js'/,
+    "the check fails because the image has no portal-read entrypoint",
+  );
+  assert.match(missing.output, /did not start 'node dist\/portal-read\.js'/, "the smoke check names the failure");
+});
+
+test("the negative smoke base resolves NODE_IMAGE, and an unresolved or malformed base reference fails", () => {
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  assert.equal(runtimeBaseImage(dockerfile, {}), "node:24-bookworm-slim", "the declared ARG default");
+  assert.equal(
+    runtimeBaseImage(dockerfile, { NODE_IMAGE: "registry.example.invalid/node:24-bookworm-slim" }),
+    "registry.example.invalid/node:24-bookworm-slim",
+    "a build-arg the dry run passes overrides the default",
+  );
+
+  // Declared without a default and not passed: the reference stays unresolved.
+  const noDefault = "ARG NODE_IMAGE\nFROM ${NODE_IMAGE} AS build\nFROM ${NODE_IMAGE}\n";
+  assert.throws(() => runtimeBaseImage(noDefault, {}), /NODE_IMAGE is unresolved/);
+  // Referenced but never declared before the first FROM.
+  assert.throws(() => runtimeBaseImage("FROM $NODE_IMAGE\n", {}), /NODE_IMAGE is unresolved/);
+  // A build-arg that is itself an unexpanded workflow expression.
+  assert.throws(
+    () => runtimeBaseImage(dockerfile, { NODE_IMAGE: "${{ vars.ESTATE_REGISTRY }}/node:24-bookworm-slim" }),
+    /NODE_IMAGE resolves to a malformed image reference/,
+  );
+  // A malformed default.
+  assert.throws(
+    () => runtimeBaseImage("ARG NODE_IMAGE=Node:24 slim\nFROM ${NODE_IMAGE}\n", {}),
+    /NODE_IMAGE resolves to a malformed image reference/,
+  );
 });
