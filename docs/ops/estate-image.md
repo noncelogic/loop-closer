@@ -105,6 +105,11 @@ never the credential itself, and fails naming the missing input
 `tests/ci/estate-image-workflow.test.ts` runs the script against a local
 stand-in for OpenBao.
 
+
+Both dry runs gate the merge: the `ci` workflow's `ci-result` job needs every
+other `ci` job and fails unless each succeeded, and branch protection on
+`main` requires `ci-result`, strict (policy main-stays-green).
+`tests/ci/ci-result.test.ts` checks the job.
 ## Verifying a publish
 
 1. Merge to `main`, then check that the `estate-image` run's `publish` job
