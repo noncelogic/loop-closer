@@ -85,4 +85,4 @@ patches:
 images:
   - name: ghcr.io/noncelogic/loop-closer
     newName: noncelogicci.azurecr.io/loopcloser
-    newTag: sha-96f1e93b7a2b3811b65ae02ad2235415aa5f9c5a
+    digest: sha256:bc391392ab67c79938cdb1dbf8f4d0e04d8f7e9bc5055144ae98fc5d3ade7290
