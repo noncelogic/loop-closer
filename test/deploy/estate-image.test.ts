@@ -16,9 +16,11 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, parseAllDocuments } from "yaml";
+import { REGISTRY_ATTEMPTS, backoffMs, registryOp } from "../../.github/scripts/estate-registry-retry.mjs";
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 type Obj = Record<string, any>;
@@ -222,4 +224,178 @@ test("the negative smoke base resolves NODE_IMAGE, and an unresolved or malforme
     () => runtimeBaseImage("ARG NODE_IMAGE=Node:24 slim\nFROM ${NODE_IMAGE}\n", {}),
     /NODE_IMAGE resolves to a malformed image reference/,
   );
+});
+
+// LC-EST-PUBLISH-BOUNDED-WAIT acceptance: the main-only publish depends on two
+// external registry operations, the node base pull from the estate ACR cache
+// (LC-EST-BASE-FROM-ACR) and the image push. Policy main-stays-green asks its
+// main step to tolerate those delays with a bounded wait: both run through
+// .github/scripts/estate-registry-retry.mjs, which retries a transient
+// registry failure up to a fixed attempt cap with backoff and then fails with
+// the last registry error. A credential or reference error fails on the first
+// attempt. The wait is injected, so these tests never sleep; the registry
+// operations are the script's real `docker` calls against a stub `docker`.
+const RETRY_REL = ".github/scripts/estate-registry-retry.mjs";
+
+/**
+ * A `docker` stub on PATH that fails its first `failures` calls with
+ * `message` on stderr, then prints `success` and exits 0. Records each call.
+ */
+function flakyDocker(failures: number, message: string, success: string): { dir: string; calls: () => string[] } {
+  const dir = mkdtempSync(join(tmpdir(), "lc-docker-flaky-"));
+  const record = join(dir, "calls");
+  writeFileSync(
+    join(dir, "docker"),
+    [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> "${record}"`,
+      `n=$(wc -l < "${record}")`,
+      `if [ "$n" -le ${failures} ]; then printf '%s\\n' ${JSON.stringify(message)} >&2; exit 1; fi`,
+      `printf '%s\\n' ${JSON.stringify(success)}`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(dir, "docker"), 0o755);
+  return {
+    dir,
+    calls: () => (existsSync(record) ? readFileSync(record, "utf8").trim().split("\n") : []),
+  };
+}
+
+function stubEnv(dir: string): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: `${dir}:${process.env["PATH"]}` };
+}
+
+const REF = "registry.estate.example/loopcloser:sha-0123456789abcdef";
+const DIGEST = `sha256:${"ab".repeat(32)}`;
+const PUSHED = `sha-0123456789abcdef: digest: ${DIGEST} size: 1784`;
+
+test("publish registry retry succeeds when a transient registry failure clears before the attempt cap", async () => {
+  const stub = flakyDocker(2, "received unexpected HTTP status: 503 Service Unavailable", PUSHED);
+  const waits: number[] = [];
+  try {
+    const result = await registryOp("push", REF, {
+      env: stubEnv(stub.dir),
+      sleep: async (ms) => void waits.push(ms),
+      log: () => {},
+    });
+    assert.equal(result.attempts, 3, "two transient failures, then the push went through");
+    assert.equal(result.digest, DIGEST, "the digest the registry returned for the push");
+    assert.deepEqual(stub.calls(), [`push ${REF}`, `push ${REF}`, `push ${REF}`]);
+    assert.deepEqual(waits, [backoffMs(1), backoffMs(2)], "one backoff wait before each retry");
+    assert.ok(backoffMs(2) > backoffMs(1), "the wait backs off");
+  } finally {
+    rmSync(stub.dir, { recursive: true, force: true });
+  }
+
+  // The node base pull from the estate ACR cache takes the same bounded wait.
+  const base = "registry.estate.example/node:24-bookworm-slim";
+  const pull = flakyDocker(1, "toomanyrequests: too many requests", "Status: Downloaded newer image");
+  try {
+    const result = await registryOp("pull", base, { env: stubEnv(pull.dir), sleep: async () => {}, log: () => {} });
+    assert.equal(result.attempts, 2);
+    assert.deepEqual(pull.calls(), [`pull ${base}`, `pull ${base}`]);
+  } finally {
+    rmSync(pull.dir, { recursive: true, force: true });
+  }
+});
+
+test("publish registry retry stops at its attempt cap and surfaces the last registry error", async () => {
+  const stub = flakyDocker(100, "net/http: TLS handshake timeout", PUSHED);
+  const waits: number[] = [];
+  try {
+    await assert.rejects(
+      registryOp("push", REF, { env: stubEnv(stub.dir), sleep: async (ms) => void waits.push(ms), log: () => {} }),
+      (err: Error) => {
+        assert.match(err.message, new RegExp(`docker push ${REF.replace(/[.]/g, "\\.")} failed after ${REGISTRY_ATTEMPTS} attempts`));
+        assert.match(err.message, /net\/http: TLS handshake timeout/, "the last registry error is surfaced");
+        return true;
+      },
+    );
+    assert.equal(stub.calls().length, REGISTRY_ATTEMPTS, "no attempt beyond the cap");
+    assert.equal(waits.length, REGISTRY_ATTEMPTS - 1, "no wait after the last attempt");
+    assert.ok(waits.reduce((a, b) => a + b, 0) <= 5 * 60_000, "the whole wait is bounded well inside the job's timeout");
+  } finally {
+    rmSync(stub.dir, { recursive: true, force: true });
+  }
+
+  // A credential or reference error is not a delay: it fails on the first
+  // attempt, so a misconfigured publish is never hidden behind retries.
+  for (const message of [
+    "unauthorized: authentication required",
+    "denied: requested access to the resource is denied",
+    "manifest unknown: manifest tagged by \"24-bookworm-slim\" is not found",
+    "invalid reference format",
+  ]) {
+    const bad = flakyDocker(100, message, PUSHED);
+    try {
+      await assert.rejects(
+        registryOp("pull", REF, { env: stubEnv(bad.dir), sleep: async () => assert.fail("no wait"), log: () => {} }),
+        (err: Error) => err.message.includes("failed on attempt 1") && err.message.includes(message),
+        message,
+      );
+      assert.equal(bad.calls().length, 1, `${message}: one attempt only`);
+    } finally {
+      rmSync(bad.dir, { recursive: true, force: true });
+    }
+  }
+
+  // A push that reports no digest is an error, not a success.
+  const noDigest = flakyDocker(0, "", "pushed");
+  try {
+    await assert.rejects(
+      registryOp("push", REF, { env: stubEnv(noDigest.dir), sleep: async () => {}, log: () => {} }),
+      /reported no sha256 digest/,
+    );
+  } finally {
+    rmSync(noDigest.dir, { recursive: true, force: true });
+  }
+});
+
+test("the publish pulls the node base and pushes the image through the bounded registry retry", () => {
+  const publish = parse(readFileSync(PUBLISH, "utf8")) as Obj;
+  const steps = ((publish["jobs"] as Obj)["publish"] as Obj)["steps"] as Obj[];
+  const idx = (pred: (s: Obj) => boolean) => steps.findIndex(pred);
+  const login = idx((s) => String(s["run"] ?? "").includes("estate-registry-credential.mjs login"));
+  const pull = idx((s) => String(s["run"] ?? "").trim() === `node ${RETRY_REL} pull "$NODE_IMAGE"`);
+  const build = idx((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
+  const push = idx((s) => String(s["run"] ?? "").trim() === `node ${RETRY_REL} push "$IMAGE_REF"`);
+  assert.ok(login >= 0 && pull > login && build > pull && push > build, "login, base pull, build, push");
+
+  const nodeImage = "${{ vars.ESTATE_REGISTRY }}/node:24-bookworm-slim";
+  const tag = "${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}";
+  assert.deepEqual(steps[pull]!["env"], { NODE_IMAGE: nodeImage });
+  const buildWith = steps[build]!["with"] as Obj;
+  assert.equal(buildWith["push"], false, "the build pushes nothing itself; the push is retried");
+  assert.equal(buildWith["load"], true, "the built image lands in the local image store for the push");
+  assert.equal(buildWith["tags"], tag);
+  assert.match(String(buildWith["build-args"]), new RegExp(`NODE_IMAGE=${nodeImage.replace(/[$.{}]/g, "\\$&")}`));
+  // The docker driver builds from the daemon's image store, so the build uses
+  // the base the retried pull fetched instead of pulling it again unretried.
+  const buildx = steps.find((s) => String(s["uses"] ?? "").startsWith("docker/setup-buildx-action@"));
+  assert.equal((buildx?.["with"] as Obj | undefined)?.["driver"], "docker");
+  assert.equal(steps[push]!["id"], "push", "the digest record reads the retried push's output");
+  assert.deepEqual(steps[push]!["env"], { IMAGE_REF: tag });
+});
+
+test("the registry retry CLI records the pushed digest as the push step's output", () => {
+  const stub = flakyDocker(0, "", PUSHED);
+  const out = mkdtempSync(join(tmpdir(), "lc-gh-output-"));
+  const ghOutput = join(out, "output");
+  writeFileSync(ghOutput, "");
+  try {
+    const r = spawnSync(process.execPath, [join(repoRoot, RETRY_REL), "push", REF], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...stubEnv(stub.dir), GITHUB_OUTPUT: ghOutput },
+    });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(readFileSync(ghOutput, "utf8"), `digest=${DIGEST}\n`);
+
+    const usage = spawnSync(process.execPath, [join(repoRoot, RETRY_REL), "tag", REF], { cwd: repoRoot, encoding: "utf8" });
+    assert.equal(usage.status, 2, "an unknown operation is a usage error");
+  } finally {
+    rmSync(stub.dir, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
+  }
 });

@@ -232,10 +232,13 @@ function scriptStep(job: Obj, mode: string): Obj {
 test("the publish job keeps the OpenBao login, main's pushed-digest record and a final registry logout", () => {
   const steps = ((load("estate-image.yml")["jobs"] as Obj)["publish"] as Obj)["steps"] as Obj[];
   const login = steps.indexOf(scriptStep({ steps }, "login"));
-  const push = steps.findIndex((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
+  // The push runs through the bounded registry retry (LC-EST-PUBLISH-BOUNDED-WAIT).
+  const push = steps.findIndex((s) => s["id"] === "push");
+  const build = steps.findIndex((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
   const record = steps.findIndex((s) => s["name"] === "Record pushed digest");
   const logout = steps.findIndex((s) => String(s["run"] ?? "").startsWith("docker logout"));
-  assert.ok(login >= 0 && push > login && record > push && logout > record, "login, push, record digest, then logout");
+  assert.ok(login >= 0 && build > login && push > build && record > push && logout > record, "login, build, push, record digest, then logout");
+  assert.match(String(steps[push]!["run"]), /estate-registry-retry\.mjs push/);
   assert.equal(steps[push]!["id"], "push");
   assert.deepEqual(steps[record]!["env"], { DIGEST: "${{ steps.push.outputs.digest }}", IMAGE: "${{ vars.ESTATE_REGISTRY }}/loopcloser" });
   assert.equal(steps[logout]!["if"], "always()");
