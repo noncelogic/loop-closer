@@ -18,6 +18,12 @@ resources:
   - service.yaml
   - tick-cronjob.yaml
 
+# The generated name changes when a principal's scope changes so the API reloads it.
+configMapGenerator:
+  - name: loopcloser-api-scopes
+    files:
+      - hermes=api-scopes/hermes
+
 # Published by .github/workflows/ci.yml (job `image`). deploy/overlays/aks-obs-01,
 # what the estate syncs, pins the estate-registry sha-<commit> image instead.
 images:
