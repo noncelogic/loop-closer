@@ -71,6 +71,18 @@ fails with `repository variable <NAME> is not set` if any of them is empty.
 If the login fails, the step's error names the input:
 `OpenBao push credential kv/loop-closer/registry-push is unreachable: <why>`.
 
+## Node base image
+
+The Dockerfile takes its node base for both stages from `ARG NODE_IMAGE`
+(default `node:24-bookworm-slim`). The publish builds with
+`NODE_IMAGE=<ESTATE_REGISTRY>/node:24-bookworm-slim`, served by the estate ACR
+cache rule for `node`, with the push credential it has already logged in with
+(the `loopcloser-push` token may read repository `node`). It pulls nothing from
+`registry-1.docker.io`: run 44531071209 got `429 Too Many Requests` there,
+because every aks-ci-01 node shares one egress IP (LC-EST-BASE-FROM-ACR). The
+pull-request `estate-image-dry-run` holds no registry credential and keeps the
+default. `tests/ci/estate-image-workflow.test.ts` checks both.
+
 ## Pull-request dry run
 
 The publish acts only on `main`, so every pull request proves it first: the

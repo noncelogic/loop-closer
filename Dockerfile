@@ -1,5 +1,9 @@
 # loopcloser service image: ghcr.io/noncelogic/loop-closer (built by CI job `image`).
-FROM node:24-bookworm-slim AS build
+# NODE_IMAGE: the node base for both stages. The estate-image publish sets it to
+# <ESTATE_REGISTRY>/node:24-bookworm-slim (the estate registry cache) so it pulls
+# nothing from Docker Hub (LC-EST-BASE-FROM-ACR); other builds keep the default.
+ARG NODE_IMAGE=node:24-bookworm-slim
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
@@ -7,7 +11,7 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:24-bookworm-slim
+FROM ${NODE_IMAGE}
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
