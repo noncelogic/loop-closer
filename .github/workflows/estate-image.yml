@@ -64,11 +64,19 @@ jobs:
           ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: node .github/scripts/estate-registry-credential.mjs login
+      # The node base comes from the estate registry cache (ACR cache rule for
+      # node) with the credential logged in above, never from Docker Hub: run
+      # 44531071209 got 429 Too Many Requests from registry-1.docker.io, since
+      # every aks-ci-01 node shares one egress IP (LC-EST-BASE-FROM-ACR). ci's
+      # estate-image-dry-run holds no registry credential and keeps the
+      # Dockerfile default.
       - id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          build-args: |
+            NODE_IMAGE=${{ vars.ESTATE_REGISTRY }}/node:24-bookworm-slim
           tags: ${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

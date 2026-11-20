@@ -231,7 +231,11 @@ test("the loopcloser-db cluster bootstrap creates the loopcloser_app NOLOGIN rol
 
 test("Dockerfile builds on Node 24 with tsc and runs node dist/main.js", () => {
   const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
-  assert.match(dockerfile, /^FROM node:24[\w.-]*/m);
+  // Both stages build FROM ${NODE_IMAGE}, whose default is Node 24; the estate
+  // publish points it at the estate registry cache of the same image (LC-EST-BASE-FROM-ACR).
+  assert.match(dockerfile, /^ARG NODE_IMAGE=node:24[\w.-]*$/m);
+  assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\}/m);
+  assert.doesNotMatch(dockerfile, /^FROM (?!\$\{NODE_IMAGE\})/m);
   assert.match(dockerfile, /npm run build/);
   assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/m);
 });
