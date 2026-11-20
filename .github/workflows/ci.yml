@@ -158,3 +158,25 @@ jobs:
           ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: node .github/scripts/estate-registry-credential.mjs check
+
+  # The one required status check on main (policy main-stays-green; branch
+  # protection on main is strict and requires `ci-result`, docs/EXTERNAL-REVIEW.md
+  # "Enforcement map"). Needs every other job in this workflow, so a pull
+  # request merges only when test, manifests, image, estate-image-dry-run and
+  # estate-image-inputs all passed on it. Runs even when a needed job fails, is
+  # cancelled or is skipped, and fails then: a skipped required check would
+  # otherwise count as passing. A new job in this file is added to `needs`
+  # (tests/ci/main-gate.test.ts).
+  ci-result:
+    if: always()
+    needs: [test, manifests, image, estate-image-dry-run, estate-image-inputs]
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every ci job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "needed job results: $RESULTS"
+          test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true

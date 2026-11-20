@@ -147,6 +147,7 @@ second look, a changed mind, or an anomaly report can still stop the merge.
 | Rule | Enforced by |
 | --- | --- |
 | PR required, force-push/deletion blocked, conversations resolved | Branch protection on `main` (applies to admins too) |
+| Every job main runs is proven on the pull request (policy main-stays-green) | Branch protection on `main`: strict (up to date with main), required status check `ci-result`, which needs every `.github/workflows/ci.yml` job (tests/ci/main-gate.test.ts) |
 | Sensitive-path review | CODEOWNERS + required code-owner review |
 | External CI gated, read-only token, no secrets to forks | Actions settings: approval for all external contributors; default workflow permissions = read |
 | Owner-only policy changes | CODEOWNERS on `.github/`, this file, CONTRIBUTING.md, SECURITY.md |
