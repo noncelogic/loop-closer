@@ -174,9 +174,20 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
+      # The script reads only RESULTS (one entry per needed job, as GitHub's
+      # toJSON prints it) and passes only when every entry is `success`;
+      # tests/ci/main-gate.test.ts runs this exact text against controlled
+      # results, so keep `${{ }}` expressions out of it.
       - name: Every ci job passed
+        shell: bash
         env:
           RESULTS: ${{ toJSON(needs.*.result) }}
         run: |
           echo "needed job results: $RESULTS"
-          test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true
+          results=$(printf '%s' "$RESULTS" | tr -d '[]" \n\r\t')
+          if [ -z "$results" ]; then echo "no needed job results"; exit 1; fi
+          case ",$results," in *,,*) echo "a needed job has no result"; exit 1 ;; esac
+          IFS=',' read -ra each <<< "$results"
+          for r in "${each[@]}"; do
+            if [ "$r" != success ]; then echo "a needed job ended '$r', not success"; exit 1; fi
+          done
