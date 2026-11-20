@@ -1,0 +1,20 @@
+{
+  "image": "noncelogicci.azurecr.io/loopcloser",
+  "digest": "sha256:bc391392ab67c79938cdb1dbf8f4d0e04d8f7e9bc5055144ae98fc5d3ade7290",
+  "publish": {
+    "workflow": "estate-image",
+    "job": "publish",
+    "run": 44729003029,
+    "sourceCommit": "49c97fd4057450a1da92627f8889842e77a04341"
+  },
+  "pull": {
+    "cluster": "aks-obs-01",
+    "namespace": "loop-closer",
+    "credential": "kv/loopcloser/registry-pull",
+    "pullSecret": "loopcloser-registry-pull",
+    "route": "DevOps",
+    "digest": "sha256:bc391392ab67c79938cdb1dbf8f4d0e04d8f7e9bc5055144ae98fc5d3ade7290",
+    "verifiedAt": "2026-11-20T12:03:12.105059+00:00",
+    "evidence": "Kubernetes Job loop-closer/loopcloser-image-proof-44729003029 completed; pod imageID matched the published digest and node --version exited 0."
+  }
+}
