@@ -49,6 +49,9 @@ spec:
             - name: api-keys
               mountPath: /etc/loopcloser/api-keys
               readOnly: true
+            - name: api-scopes
+              mountPath: /etc/loopcloser/api-scopes
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -74,3 +77,6 @@ spec:
         - name: api-keys
           secret:
             secretName: loopcloser-api-keys
+        - name: api-scopes
+          configMap:
+            name: loopcloser-api-scopes
