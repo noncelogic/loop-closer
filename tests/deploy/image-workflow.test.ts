@@ -73,8 +73,12 @@ test("the estate image workflow publishes from main only and logs in to the esta
   const buildIdx = all.findIndex((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
   assert.ok(buildIdx > loginIdx, "the push comes after the registry login");
   const build = all[buildIdx]!["with"] as Obj;
-  assert.equal(build["push"], true);
   assert.equal(build["tags"], "${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}");
+  // The push itself is the bounded-retry step after the build (LC-EST-PUBLISH-BOUNDED-WAIT).
+  const pushIdx = all.findIndex((s) => s["id"] === "push");
+  assert.ok(pushIdx > buildIdx, "the image is pushed after it is built");
+  assert.equal(String(all[pushIdx]!["run"]).trim(), 'node .github/scripts/estate-registry-retry.mjs push "$IMAGE_REF"');
+  assert.deepEqual(all[pushIdx]!["env"], { IMAGE_REF: build["tags"] });
 
   // Checkout leaves no token behind on the runner.
   const checkout = all.find((s) => String(s["uses"] ?? "").startsWith("actions/checkout@"));

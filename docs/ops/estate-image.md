@@ -44,7 +44,7 @@ fails with `repository variable <NAME> is not set` if any of them is empty.
 
 | Variable | Read by | Holds |
 | --- | --- | --- |
-| `ESTATE_REGISTRY` | `estate-registry-credential.mjs`, `docker/build-push-action` | Registry host aks-obs-01 pulls from (`noncelogicci.azurecr.io`); the image is pushed as `<ESTATE_REGISTRY>/loopcloser:sha-<commit>`. `deploy/overlays/aks-obs-01` and `kv/loopcloser/registry-pull` (docs/ops/registry-pull.md) name this same host; `tests/deploy/estate-registry.test.ts` checks it |
+| `ESTATE_REGISTRY` | `estate-registry-credential.mjs`, `estate-registry-retry.mjs`, `docker/build-push-action` | Registry host aks-obs-01 pulls from (`noncelogicci.azurecr.io`); the image is pushed as `<ESTATE_REGISTRY>/loopcloser:sha-<commit>`. `deploy/overlays/aks-obs-01` and `kv/loopcloser/registry-pull` (docs/ops/registry-pull.md) name this same host; `tests/deploy/estate-registry.test.ts` checks it |
 | `OPENBAO_ADDR` | `estate-registry-credential.mjs` | Estate OpenBao address the runner reaches (`https://…`, no trailing path) |
 
 ## OpenBao push credential
@@ -82,6 +82,22 @@ cache rule for `node`, with the push credential it has already logged in with
 because every aks-ci-01 node shares one egress IP (LC-EST-BASE-FROM-ACR). The
 pull-request `estate-image-dry-run` holds no registry credential and keeps the
 default. `tests/ci/estate-image-workflow.test.ts` checks both.
+
+## Bounded wait on the registry
+
+The base pull and the image push are the publish's two external registry
+operations, so both run through `.github/scripts/estate-registry-retry.mjs`
+(LC-EST-PUBLISH-BOUNDED-WAIT, policy main-stays-green): `pull` fetches
+`<ESTATE_REGISTRY>/node:24-bookworm-slim` before the build (buildx uses the
+`docker` driver, so the build takes the base from the daemon's image store),
+the build loads the image without pushing, and `push` pushes
+`<ESTATE_REGISTRY>/loopcloser:sha-<commit>` and records the returned digest as
+the step's `digest` output. A transient registry failure (HTTP 429/5xx,
+timeouts, dropped connections) is retried up to 5 attempts with backoff of 5,
+10, 20 and 40 seconds; at the cap the step fails with the last registry error.
+A credential or reference error (`unauthorized`, `denied`, `not found`,
+`manifest unknown`, an invalid reference) or any unrecognised failure fails on
+the first attempt. `test/deploy/estate-image.test.ts` checks it.
 
 ## Pull-request dry run
 

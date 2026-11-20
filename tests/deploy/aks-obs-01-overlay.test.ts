@@ -122,8 +122,8 @@ test(
 
     // The publish workflow reports the digest the registry returned for its push.
     const steps = publishJob();
-    const push = steps.findIndex((s) => String(s["uses"] ?? "").startsWith("docker/build-push-action@"));
-    assert.equal(steps[push]?.["id"], "push");
+    const push = steps.findIndex((s) => s["id"] === "push");
+    assert.ok(push >= 0, "the publish job has the push step");
     const record = steps.findIndex((s) => s["name"] === "Record pushed digest");
     assert.ok(record > push, "the publish job records the digest after pushing");
     assert.equal(steps[record]!["env"]["DIGEST"], "${{ steps.push.outputs.digest }}");

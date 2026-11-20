@@ -58,7 +58,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # The docker driver builds from the daemon's image store, so the build
+      # uses the node base the retried pull below fetched instead of pulling it
+      # again outside the bounded wait.
       - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
       - name: Log in to the estate registry with the OpenBao push credential
         env:
           ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
@@ -70,17 +75,32 @@ jobs:
       # every aks-ci-01 node shares one egress IP (LC-EST-BASE-FROM-ACR). ci's
       # estate-image-dry-run holds no registry credential and keeps the
       # Dockerfile default.
-      - id: push
-        uses: docker/build-push-action@v6
+      # The base pull and the image push are the publish's external registry
+      # operations; both run through estate-registry-retry.mjs, which waits out
+      # a transient registry failure (429/5xx, timeouts) up to a fixed attempt
+      # cap with backoff, then fails with the last registry error. A credential
+      # or reference error fails on the first attempt (LC-EST-PUBLISH-BOUNDED-WAIT,
+      # policy main-stays-green).
+      - name: Pull the node base from the estate registry cache
+        env:
+          NODE_IMAGE: ${{ vars.ESTATE_REGISTRY }}/node:24-bookworm-slim
+        run: node .github/scripts/estate-registry-retry.mjs pull "$NODE_IMAGE"
+      - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: false
+          load: true
           build-args: |
             NODE_IMAGE=${{ vars.ESTATE_REGISTRY }}/node:24-bookworm-slim
           tags: ${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - id: push
+        name: Push the image to the estate registry
+        env:
+          IMAGE_REF: ${{ vars.ESTATE_REGISTRY }}/loopcloser:sha-${{ github.sha }}
+        run: node .github/scripts/estate-registry-retry.mjs push "$IMAGE_REF"
       # The digest the registry returned for this push, with its source
       # commit and run, so the overlay can pin exactly this image by digest
       # once a pull of it on aks-obs-01 is verified (LC-EST-IMAGE-READY,
