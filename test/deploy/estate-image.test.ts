@@ -176,11 +176,18 @@ test("the estate image built by the publish dry run starts the portal-read entry
   // (LC-EST-BASE-ARG-SMOKE).
   const base = runtimeBaseImage(readFileSync(join(repoRoot, "Dockerfile"), "utf8"), buildArgs(dryBuild));
   assert.equal(base, "node:24-bookworm-slim", "the dry run keeps the Dockerfile's default node base");
+  // A BuildKit build need not leave the base tag in Docker's runnable image
+  // store, so the base is pulled, and the pull must succeed, before the smoke
+  // run: the case never depends on the daemon's existing image cache.
+  const pulled = spawnSync("docker", ["pull", base], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(pulled.status, 0, `docker pull of the base image ${base} failed:\n${pulled.stdout}${pulled.stderr}`);
   const missing = smoke(base, command);
   assert.equal(missing.status, 1, `the smoke check fails on an image without the entrypoint:\n${missing.output}`);
+  // Docker's benign cache-miss notice ("Unable to find image ... locally") is
+  // not a failure: the missing-module assertion below proves the image ran.
   assert.doesNotMatch(
     missing.output,
-    /invalid reference format|Unable to find image|pull access denied|manifest unknown/i,
+    /invalid reference format|pull access denied|manifest unknown/i,
     "the base image ran: the case does not pass on an image that cannot be run",
   );
   assert.match(
