@@ -159,40 +159,6 @@ jobs:
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: node .github/scripts/estate-registry-credential.mjs check
 
-<<<<<<< HEAD
-  # The one required status check on main (policy main-stays-green; branch
-  # protection on main is strict and requires `ci-result`, docs/EXTERNAL-REVIEW.md
-  # "Enforcement map"). Needs every other job in this workflow, so a pull
-  # request merges only when test, manifests, image, estate-image-dry-run and
-  # estate-image-inputs all passed on it. Runs even when a needed job fails, is
-  # cancelled or is skipped, and fails then: a skipped required check would
-  # otherwise count as passing. A new job in this file is added to `needs`
-  # (tests/ci/main-gate.test.ts).
-  ci-result:
-    if: always()
-    needs: [test, manifests, image, estate-image-dry-run, estate-image-inputs]
-    runs-on: [self-hosted, aks]
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      # The script reads only RESULTS (one entry per needed job, as GitHub's
-      # toJSON prints it) and passes only when every entry is `success`;
-      # tests/ci/main-gate.test.ts runs this exact text against controlled
-      # results, so keep `${{ }}` expressions out of it.
-      - name: Every ci job passed
-        shell: bash
-        env:
-          RESULTS: ${{ toJSON(needs.*.result) }}
-        run: |
-          echo "needed job results: $RESULTS"
-          results=$(printf '%s' "$RESULTS" | tr -d '[]" \n\r\t')
-          if [ -z "$results" ]; then echo "no needed job results"; exit 1; fi
-          case ",$results," in *,,*) echo "a needed job has no result"; exit 1 ;; esac
-          IFS=',' read -ra each <<< "$results"
-          for r in "${each[@]}"; do
-            if [ "$r" != success ]; then echo "a needed job ended '$r', not success"; exit 1; fi
-          done
-=======
   # The result job, and main's one required status check (policy
   # main-stays-green, COND-277): it needs every other job in this workflow, so
   # a pull request merges only when all of them (image included) succeeded on
@@ -212,4 +178,3 @@ jobs:
           persist-credentials: false
       - name: Fail unless every needed job succeeded
         run: bash .github/scripts/ci-gate.sh ${{ join(needs.*.result, ' ') }}
->>>>>>> origin/main
