@@ -158,3 +158,19 @@ jobs:
           ESTATE_REGISTRY: ${{ vars.ESTATE_REGISTRY }}
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: node .github/scripts/estate-registry-credential.mjs check
+
+  # The result job, and main's one required status check (policy
+  # main-stays-green, COND-277): it needs every other job in this workflow, so
+  # a pull request merges only when all of them (image included) succeeded on
+  # it. Reports even when a needed job fails or is skipped, and then fails.
+  # A new job here must be added to `needs` (tests/ci/required-gate.test.ts).
+  gate:
+    if: ${{ always() }}
+    needs: [test, manifests, image, estate-image-dry-run, estate-image-inputs]
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail unless every needed job succeeded
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: echo "a needed ci job did not succeed" && exit 1
