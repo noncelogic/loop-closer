@@ -58,9 +58,9 @@ test("the aks-obs-01 listings-read CronJob stays suspended and mounts no listing
     if (o["metadata"]?.["labels"]?.["app.kubernetes.io/component"] !== "listings-read") continue;
     assert.equal(o["kind"], "CronJob", `${o["kind"]}/${o["metadata"]["name"]} is not part of the listings read`);
   }
-  assert.deepEqual(
-    objs.filter((o) => o["kind"] === "ConfigMap").map((o) => o["metadata"]["name"]),
-    [],
-    "the overlay renders no ConfigMap",
-  );
+  for (const config of objs.filter((o) => o["kind"] === "ConfigMap")) {
+    assert.match(config["metadata"]["name"], /^loopcloser-api-scopes-[a-z0-9]+$/);
+    assert.deepEqual(Object.keys(config["data"]), ["hermes"], "the API scope map holds only principal grants");
+    assert.deepEqual(JSON.stringify(config).match(URL_RE) ?? [], [], "the API scope map contains no listing URL");
+  }
 });
