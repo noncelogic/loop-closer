@@ -159,6 +159,7 @@ jobs:
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: node .github/scripts/estate-registry-credential.mjs check
 
+<<<<<<< HEAD
   # The one check branch protection on main requires, strict (policy
   # main-stays-green, COND-278). It needs every other job in this workflow, so
   # a pull request merges only when every job main runs passed on it, the
@@ -181,3 +182,24 @@ jobs:
           echo "a ci job did not succeed: ${{ join(needs.*.result, ', ') }}"
           exit 1
       - run: echo "every ci job succeeded"
+=======
+  # The result job, and main's one required status check (policy
+  # main-stays-green, COND-277): it needs every other job in this workflow, so
+  # a pull request merges only when all of them (image included) succeeded on
+  # it. Reports even when a needed job fails or is skipped, and then fails.
+  # A new job here must be added to `needs` (tests/ci/required-gate.test.ts).
+  # The decision is .github/scripts/ci-gate.sh, given every needed job's result.
+  gate:
+    if: ${{ always() }}
+    needs: [test, manifests, image, estate-image-dry-run, estate-image-inputs]
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fail unless every needed job succeeded
+        run: bash .github/scripts/ci-gate.sh ${{ join(needs.*.result, ' ') }}
+>>>>>>> origin/main
