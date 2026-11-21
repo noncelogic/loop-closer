@@ -162,7 +162,9 @@ jobs:
   # The result job, and main's one required status check (policy
   # main-stays-green, COND-277): it needs every other job in this workflow, so
   # a pull request merges only when all of them (image included) succeeded on
-  # it. Reports even when a needed job fails or is skipped, and then fails.
+  # it, the main-only publish's dry runs (estate-image-dry-run,
+  # estate-image-inputs) included (COND-278, tests/ci/ci-result.test.ts).
+  # Reports even when a needed job fails or is skipped, and then fails.
   # A new job here must be added to `needs` (tests/ci/required-gate.test.ts).
   # The decision is .github/scripts/ci-gate.sh, given every needed job's result.
   gate:
