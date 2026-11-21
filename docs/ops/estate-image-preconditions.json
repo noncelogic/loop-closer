@@ -1,0 +1,41 @@
+{
+  "description": "LC-EST-IMAGE-PRECONDITIONS: every registry, secret and OpenBao input that .github/workflows/estate-image.yml (with ci.yml's estate-image-* pull-request jobs) and the aks-obs-01 overlay's ExternalSecrets read, each with the board item that provisions it. Names and presence only; no value is recorded. Checked by test/estate/image-preconditions.test.ts.",
+  "preconditions": [
+    {
+      "kind": "github-variable",
+      "name": "ESTATE_REGISTRY",
+      "purpose": "estate registry host aks-obs-01 pulls from; the publish pushes loopcloser:sha-<commit> there",
+      "read_by": [".github/workflows/estate-image.yml", ".github/workflows/ci.yml#estate-image-inputs"],
+      "provisioning": "CLOSER-235"
+    },
+    {
+      "kind": "github-variable",
+      "name": "OPENBAO_ADDR",
+      "purpose": "estate OpenBao address the registry push login reads its credential from",
+      "read_by": [".github/workflows/estate-image.yml", ".github/workflows/ci.yml#estate-image-inputs"],
+      "provisioning": "CLOSER-235"
+    },
+    {
+      "kind": "openbao",
+      "name": "kv/loop-closer/registry-push",
+      "purpose": "loop-closer's registry push credential, read through GitHub OIDC and OpenBao JWT auth (roles loop-closer-registry-push, loop-closer-registry-push-check)",
+      "read_by": [".github/scripts/estate-registry-credential.mjs"],
+      "provisioning": "CLOSER-235"
+    },
+    {
+      "kind": "openbao",
+      "name": "kv/loopcloser/registry-pull",
+      "properties": ["registry", "username", "password"],
+      "purpose": "loop-closer's pull-only registry credential, synced into the loopcloser-registry-pull dockerconfigjson Secret",
+      "read_by": ["deploy/overlays/aks-obs-01 ExternalSecret/loopcloser-registry-pull"],
+      "provisioning": "CLOSER-165"
+    },
+    {
+      "kind": "openbao",
+      "name": "kv/loopcloser/api",
+      "purpose": "per-agent API keys self-issued by loopcloser (one property per principal), extracted whole into the loopcloser-api-keys Secret mounted at API_KEYS_DIR",
+      "read_by": ["deploy/overlays/aks-obs-01 ExternalSecret/loopcloser-api-keys (deploy/base/external-secrets.yaml, dataFrom.extract)"],
+      "provisioning": "CLOSER-54"
+    }
+  ]
+}
