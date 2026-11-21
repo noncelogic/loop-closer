@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
@@ -76,4 +77,37 @@ test("fetch still fails on a persistent 502", async () => {
   } finally {
     server.close();
   }
+});
+
+// COND-324 acceptance: ci run 44885565349 (test job) installed the pinned
+// kubectl and kustomize but only exported KUBECTL/KUSTOMIZE through
+// $GITHUB_ENV, so test/estate/overlay-render.test.ts, which looks the
+// renderers up on PATH, found neither. The installer's export step also puts
+// the install directory on PATH for later steps through $GITHUB_PATH.
+test("the installer's export step puts the pinned tools directory on PATH through $GITHUB_PATH", () => {
+  const dir = mkdtempSync(join(tmpdir(), "install-k8s-tools-"));
+  try {
+    const githubEnv = join(dir, "github_env");
+    const githubPath = join(dir, "github_path");
+    writeFileSync(githubEnv, "");
+    writeFileSync(githubPath, "");
+    const bin = join(dir, "k8s-tools");
+    execFileSync("bash", ["-c", 'source "$1" && export_k8s_tools "$2"', "bash", SCRIPT, bin], {
+      env: { ...process.env, GITHUB_ENV: githubEnv, GITHUB_PATH: githubPath },
+    });
+    assert.deepEqual(readFileSync(githubPath, "utf8").split("\n").filter(Boolean), [bin]);
+    assert.deepEqual(readFileSync(githubEnv, "utf8").split("\n").filter(Boolean), [
+      `KUBECTL=${bin}/kubectl`,
+      `KUSTOMIZE=${bin}/kustomize`,
+      `KUBECONFORM=${bin}/kubeconform`,
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the installer runs its export step", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const body = text.slice(text.indexOf("install_k8s_tools() {"));
+  assert.match(body, /^\s*export_k8s_tools "\$bin"\s*$/m, "install_k8s_tools calls export_k8s_tools with its install dir");
 });
