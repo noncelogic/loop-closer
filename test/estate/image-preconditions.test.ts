@@ -9,8 +9,8 @@
 //   `estate-image*` job of any other workflow (ci.yml's pull-request dry runs).
 //   GitHub-provided contexts (`secrets.GITHUB_TOKEN`, `github.*`, `steps.*`)
 //   are not estate preconditions and are ignored;
-// - every `remoteRef.key` (and its `property`) an ExternalSecret in the
-//   rendered aks-obs-01 overlay reads from OpenBao.
+// - every `remoteRef.key` (and its `property`) and every `dataFrom[].extract.key`
+//   an ExternalSecret in the rendered aks-obs-01 overlay reads from OpenBao.
 // A record entry no workflow reads yet is allowed; an input missing from the
 // record, or an entry without a provisioning item, fails.
 import { test } from "node:test";
@@ -70,7 +70,10 @@ function workflowInputs(files: Record<string, string>): Input[] {
   return inputs;
 }
 
-/** The OpenBao keys and properties every ExternalSecret in `objects` reads through remoteRef. */
+/**
+ * The OpenBao keys every ExternalSecret in `objects` reads: each `data[].remoteRef`
+ * key (with its property) and each `dataFrom[].extract` key (the whole path).
+ */
 function externalSecretInputs(objects: Obj[]): Input[] {
   const inputs: Input[] = [];
   for (const o of objects) {
@@ -82,6 +85,10 @@ function externalSecretInputs(objects: Obj[]): Input[] {
       const input: Input = { kind: "openbao", name: String(ref["key"]), source };
       if (ref["property"] !== undefined) input.property = String(ref["property"]);
       inputs.push(input);
+    }
+    for (const d of (o["spec"]?.["dataFrom"] ?? []) as Obj[]) {
+      const key = (d["extract"] as Obj | undefined)?.["key"];
+      if (key) inputs.push({ kind: "openbao", name: String(key), source });
     }
   }
   return inputs;
@@ -173,11 +180,17 @@ test("lists the OpenBao path the aks-obs-01 registry pull ExternalSecret reads",
     ["kv/loopcloser/registry-pull#password", "kv/loopcloser/registry-pull#registry", "kv/loopcloser/registry-pull#username"],
     "the overlay's registry pull ExternalSecret reads registry, username and password",
   );
-  assert.deepEqual(missingFromRecord(entries, inputs), [], "every overlay ExternalSecret remoteRef is recorded");
+  // The API keys ExternalSecret the overlay inherits from deploy/base extracts a whole path.
+  assert.deepEqual(
+    inputs.filter((i) => i.source === "ExternalSecret/loopcloser-api-keys").map((i) => i.name),
+    ["kv/loopcloser/api"],
+    "the overlay's API keys ExternalSecret extracts kv/loopcloser/api",
+  );
+  assert.deepEqual(missingFromRecord(entries, inputs), [], "every overlay ExternalSecret OpenBao key is recorded");
   const entry = entries.find((e) => e.kind === "openbao" && e.name === "kv/loopcloser/registry-pull");
   assert.equal(entry?.provisioning, "CLOSER-165", "the pull credential is provisioned by CLOSER-165");
 
-  // A remoteRef key or property the record does not name is caught.
+  // A remoteRef key or property, or a dataFrom extract key, the record does not name is caught.
   const extra = externalSecretInputs([
     {
       kind: "ExternalSecret",
@@ -187,12 +200,14 @@ test("lists the OpenBao path the aks-obs-01 registry pull ExternalSecret reads",
           { secretKey: "a", remoteRef: { key: "kv/loopcloser/other", property: "token" } },
           { secretKey: "b", remoteRef: { key: "kv/loopcloser/registry-pull", property: "email" } },
         ],
+        dataFrom: [{ extract: { key: "kv/loopcloser/extracted" } }],
       },
     },
   ]);
   assert.deepEqual(missingFromRecord(entries, extra).map((m) => m.split(" (")[0]), [
     "openbao kv/loopcloser/other",
     "openbao kv/loopcloser/registry-pull property email",
+    "openbao kv/loopcloser/extracted",
   ]);
 });
 

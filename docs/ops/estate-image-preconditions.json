@@ -29,6 +29,13 @@
       "purpose": "loop-closer's pull-only registry credential, synced into the loopcloser-registry-pull dockerconfigjson Secret",
       "read_by": ["deploy/overlays/aks-obs-01 ExternalSecret/loopcloser-registry-pull"],
       "provisioning": "CLOSER-165"
+    },
+    {
+      "kind": "openbao",
+      "name": "kv/loopcloser/api",
+      "purpose": "per-agent API keys self-issued by loopcloser (one property per principal), extracted whole into the loopcloser-api-keys Secret mounted at API_KEYS_DIR",
+      "read_by": ["deploy/overlays/aks-obs-01 ExternalSecret/loopcloser-api-keys (deploy/base/external-secrets.yaml, dataFrom.extract)"],
+      "provisioning": "CLOSER-54"
     }
   ]
 }
