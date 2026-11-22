@@ -110,12 +110,16 @@ jobs:
   # nothing, and runs the listings-read CronJob's command in the built image
   # (deploy/overlays/aks-obs-01/listings-read.yaml), so a merge cannot publish
   # an image that lacks the portal-read entrypoint. Reads no secret and no
-  # estate configuration. Checked by test/deploy/estate-image.test.ts.
+  # estate configuration. DRY_RUN_OF names the main-only job of
+  # estate-image.yml this job dry-runs (LC-EST-PUBLISH-DRYRUN-OF). Checked by
+  # test/deploy/estate-image.test.ts.
   estate-image-dry-run:
     runs-on: [self-hosted, aks]
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      DRY_RUN_OF: publish
     steps:
       - uses: actions/checkout@v4
         with:

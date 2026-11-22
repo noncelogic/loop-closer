@@ -200,6 +200,42 @@ test("the estate image built by the publish dry run starts the portal-read entry
   assert.match(missing.output, /did not start 'node dist\/portal-read\.js'/, "the smoke check names the failure");
 });
 
+// LC-EST-PUBLISH-DRYRUN-OF acceptance: estate-image-dry-run declares, as
+// job-level env DRY_RUN_OF, the main-only job of estate-image.yml whose inputs
+// it validates on pull requests: publish. The declaration names a real job
+// that only runs on main, and the declaring job runs on pull requests with no
+// push step, no push command and read-only permissions.
+test("estate-image-dry-run declares DRY_RUN_OF: publish, runs on pull_request, and has no push step or packages write permission", () => {
+  const ci = parse(readFileSync(CI, "utf8")) as Obj;
+  const on = ci["on"] as Obj;
+  assert.ok("pull_request" in on, "ci.yml runs on pull requests");
+  assert.ok(!("pull_request_target" in on), "never pull_request_target");
+  const job = (ci["jobs"] as Obj)[DRY_RUN_JOB] as Obj | undefined;
+  assert.ok(job, `ci.yml has the ${DRY_RUN_JOB} job`);
+  assert.equal(job["if"], undefined, "the dry run runs on every event, pull requests included");
+
+  const dryRunOf = (job["env"] as Obj | undefined)?.["DRY_RUN_OF"];
+  assert.equal(dryRunOf, "publish", "the dry run declares env DRY_RUN_OF: publish");
+
+  // The declared job exists in estate-image.yml and only runs on main.
+  const publishWf = parse(readFileSync(PUBLISH, "utf8")) as Obj;
+  const publishOn = publishWf["on"] as Obj;
+  assert.deepEqual(Object.keys(publishOn), ["push"], "the publish workflow runs on push only");
+  assert.deepEqual((publishOn["push"] as Obj)["branches"], ["main"], "the publish runs only on main");
+  assert.ok((publishWf["jobs"] as Obj)[String(dryRunOf)], `estate-image.yml has the ${dryRunOf} job DRY_RUN_OF names`);
+
+  // Read-only, and nothing in it pushes.
+  assert.deepEqual(job["permissions"], { contents: "read" }, "read-only permissions, no packages: write");
+  const steps = (job["steps"] ?? []) as Obj[];
+  for (const s of steps) {
+    if (String(s["uses"] ?? "").startsWith("docker/build-push-action@")) {
+      assert.equal((s["with"] as Obj | undefined)?.["push"], false, "the build step pushes nothing");
+    }
+    assert.doesNotMatch(String(s["run"] ?? ""), /\b(docker|podman|crane|oras)\s+push\b|estate-registry-retry\.mjs\s+push/, "no push command");
+    assert.doesNotMatch(String(s["uses"] ?? ""), /login-action|push-to-registry/, "no registry login or push action");
+  }
+});
+
 test("the negative smoke base resolves NODE_IMAGE, and an unresolved or malformed base reference fails", () => {
   const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
   assert.equal(runtimeBaseImage(dockerfile, {}), "node:24-bookworm-slim", "the declared ARG default");
