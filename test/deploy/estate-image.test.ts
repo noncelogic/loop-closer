@@ -14,7 +14,7 @@
 // touched. Requires Docker.
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -198,6 +198,146 @@ test("the estate image built by the publish dry run starts the portal-read entry
     "the check fails because the image has no portal-read entrypoint",
   );
   assert.match(missing.output, /did not start 'node dist\/portal-read\.js'/, "the smoke check names the failure");
+});
+
+// LC-EST-PUBLISH-DRYRUN-OF acceptance: estate-image-dry-run declares, as
+// job-level env DRY_RUN_OF, the main-only job of estate-image.yml whose inputs
+// it validates on pull requests: publish. The declaration names a real job
+// that only runs on main, and the declaring job runs on pull requests with no
+// push step, no push command and read-only permissions.
+test("estate-image-dry-run declares DRY_RUN_OF: publish, runs on pull_request, and has no push step or packages write permission", async () => {
+  const ci = parse(readFileSync(CI, "utf8")) as Obj;
+  const on = ci["on"] as Obj;
+  assert.ok("pull_request" in on, "ci.yml runs on pull requests");
+  assert.ok(!("pull_request_target" in on), "never pull_request_target");
+  const job = (ci["jobs"] as Obj)[DRY_RUN_JOB] as Obj | undefined;
+  assert.ok(job, `ci.yml has the ${DRY_RUN_JOB} job`);
+  assert.equal(job["if"], undefined, "the dry run runs on every event, pull requests included");
+
+  const dryRunOf = (job["env"] as Obj | undefined)?.["DRY_RUN_OF"];
+  assert.equal(dryRunOf, "publish", "the dry run declares env DRY_RUN_OF: publish");
+
+  // The declared job exists in estate-image.yml and only runs on main.
+  const publishWf = parse(readFileSync(PUBLISH, "utf8")) as Obj;
+  const publishOn = publishWf["on"] as Obj;
+  assert.deepEqual(Object.keys(publishOn), ["push"], "the publish workflow runs on push only");
+  assert.deepEqual((publishOn["push"] as Obj)["branches"], ["main"], "the publish runs only on main");
+  assert.ok((publishWf["jobs"] as Obj)[String(dryRunOf)], `estate-image.yml has the ${dryRunOf} job DRY_RUN_OF names`);
+
+  await assertDryRunDoesNotPublish(job);
+});
+
+/** Execute every run step, including called helpers, at recording registry transports. */
+async function assertDryRunDoesNotPublish(job: Obj): Promise<void> {
+  assert.deepEqual(job["permissions"], { contents: "read" }, "read-only permissions, no packages: write");
+  const steps = (job["steps"] ?? []) as Obj[];
+  const allowedActions = new Set([
+    "actions/checkout@v4",
+    "docker/setup-buildx-action@v3",
+    "docker/build-push-action@v6",
+  ]);
+  for (const step of steps) {
+    if (step["uses"] === undefined) continue;
+    assert.ok(allowedActions.has(step["uses"]), `uncovered action: ${step["uses"]}`);
+    if (step["uses"] === "docker/build-push-action@v6") {
+      assert.equal(step["with"]?.["push"], false, "the build step pushes nothing");
+    }
+  }
+
+  const sha = "a".repeat(40);
+  const expected = {
+    command: "docker",
+    args: [
+      "run", "--rm", "--network", "none", "--read-only", "--user", "1000:1000",
+      "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+      "--env", 'LISTINGS_DIRECTORY_PAGES={"rove-connector":"https://listings.example.invalid/rove-connector"}',
+      "--entrypoint", "node", `loopcloser:sha-${sha}`, "dist/portal-read.js",
+    ],
+  };
+  const dir = mkdtempSync(join(tmpdir(), "lc-dry-run-transports-"));
+  const record = join(dir, "calls.jsonl");
+  const calls = (): { command: string; args: string[] }[] => existsSync(record)
+    ? readFileSync(record, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+    : [];
+  const resolve = (value: string): string => {
+    const resolved = value.replaceAll("${{ github.sha }}", sha);
+    assert.ok(!resolved.includes("${{"), `uncovered workflow expression: ${resolved}`);
+    return resolved;
+  };
+  try {
+    // Each transport records argv and rejects everything except the exact,
+    // network-disabled smoke run. A helper cannot hide a push/login by ignoring
+    // its exit status: acceptance also checks the recorded calls after close.
+    for (const command of ["docker", "podman", "crane", "oras"]) {
+      const transport = join(dir, command);
+      writeFileSync(transport, [
+        `#!${process.execPath}`,
+        'const { appendFileSync } = require("node:fs");',
+        `const call = { command: ${JSON.stringify(command)}, args: process.argv.slice(2) };`,
+        `appendFileSync(${JSON.stringify(record)}, JSON.stringify(call) + "\\n");`,
+        `if (JSON.stringify(call) !== ${JSON.stringify(JSON.stringify(expected))}) {`,
+        '  console.error("unexpected registry operation: " + JSON.stringify(call));',
+        '  process.exit(70);',
+        '}',
+        'console.error("portal read failed: Error: DATABASE_URL is not set");',
+        'process.exit(1);',
+        "",
+      ].join("\n"));
+      chmodSync(transport, 0o755);
+    }
+    for (const step of steps) {
+      if (step["run"] === undefined) continue;
+      const env: NodeJS.ProcessEnv = {
+        PATH: `${dir}:${process.env["PATH"]}`,
+        HOME: dir,
+        DOCKER_CONFIG: dir,
+        GITHUB_SHA: sha,
+        GITHUB_EVENT_NAME: "pull_request",
+      };
+      for (const [key, value] of Object.entries({ ...job["env"], ...step["env"] })) {
+        env[key] = resolve(String(value));
+      }
+      const result = await new Promise<{ status: number | null; output: string }>((done, reject) => {
+        const child = spawn("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", resolve(step["run"])], {
+          cwd: repoRoot, env, timeout: 10_000,
+        });
+        let output = "";
+        child.stdout.on("data", (chunk) => { output += chunk; });
+        child.stderr.on("data", (chunk) => { output += chunk; });
+        child.on("error", reject);
+        child.on("close", (status) => done({ status, output }));
+      });
+      assert.deepEqual(calls().filter((call) => JSON.stringify(call) !== JSON.stringify(expected)), [],
+        "unexpected registry operation: no push or login is allowed");
+      assert.equal(result.status, 0, `dry-run command failed: ${result.output}`);
+    }
+    assert.deepEqual(calls(), [expected], "only the smoke container ran; no push or login occurred");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the dry-run acceptance rejects a push or login hidden in a helper script", async () => {
+  const ci = parse(readFileSync(CI, "utf8")) as Obj;
+  const job = (ci["jobs"] as Obj)[DRY_RUN_JOB] as Obj;
+  const dir = mkdtempSync(join(tmpdir(), "lc-dry-run-helper-"));
+  try {
+    for (const invocation of [
+      "docker push", "docker login", "docker image push",
+      "podman push", "podman login", "crane push", "crane auth login", "oras push", "oras login",
+      "node .github/scripts/estate-registry-retry.mjs push",
+    ]) {
+      const helper = join(dir, "helper.sh");
+      // Mask the rejected command's exit status: recorded calls must still fail
+      // acceptance even when the helper returns success.
+      writeFileSync(helper, `${invocation} registry.example.invalid/loopcloser:pr || true\n`);
+      const changed = structuredClone(job);
+      (changed["steps"] as Obj[]).push({ run: `bash "${helper}"` });
+      await assert.rejects(assertDryRunDoesNotPublish(changed), /unexpected registry operation/, invocation);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the negative smoke base resolves NODE_IMAGE, and an unresolved or malformed base reference fails", () => {
