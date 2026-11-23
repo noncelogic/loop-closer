@@ -23,7 +23,8 @@
 //          credential's `username` and `password`, masks them and pipes the
 //          password to `docker login --password-stdin`. Nothing is written to
 //          disk by this script, echoed or passed as an argument.
-// Any missing or unreachable input fails with an ::error:: naming it. Transient
+// The first missing or unreachable input fails with one ::error:: naming it
+// (test/ci/estate-image-workflow.test.ts). Transient
 // failures (network, HTTP 429/5xx) are retried a bounded number of times.
 import { spawn } from "node:child_process";
 
@@ -300,14 +301,14 @@ async function main(mode) {
   }
   const registry = process.env.ESTATE_REGISTRY ?? "";
   const addr = (process.env.OPENBAO_ADDR ?? "").replace(/\/+$/, "");
-  let missing = false;
+  // Inputs are checked in order and the first missing one fails the run, so
+  // the error names exactly that input (LC-EST-IMAGE-INPUTS-CHECK).
   for (const [name, value] of [["ESTATE_REGISTRY", registry], ["OPENBAO_ADDR", addr]]) {
     if (!value) {
       fail(`repository variable ${name} is not set`);
-      missing = true;
+      return;
     }
   }
-  if (missing) return;
 
   let credentialStep = true;
   try {
