@@ -16,6 +16,9 @@ name: deploy
 # and the per-pull-request gate stays ci.yml `gate` (Rule:
 # policies/placement-defaults.yaml#gates, slow suites outside the gate). A red
 # batch becomes the next fix task. workflow_dispatch runs a batch on demand.
+# A pull request that changes these jobs, their scripts, the journeys or the
+# candidate's inputs runs both jobs first as a dry run
+# (.github/workflows/deploy-dry-run.yml, the same steps on its own candidate).
 #
 # A scheduled run checks out main's head. `batch` reads the last successful
 # run of this workflow and lets `deploy` run only when main moved since then,

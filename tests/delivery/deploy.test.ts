@@ -5,7 +5,10 @@
 // E2E suite and the journeys against it, and always tears it down. delivery.yaml
 // `deploy` names the workflow, the job and the journeys command; the journeys
 // are their own selection (tests/journeys/**/*.journey.ts) that no per-merge
-// workflow runs. The deploy itself is exercised through
+// workflow runs. A pull request that changes what either of the queue's jobs
+// (`batch`, `deploy`) executes or reads runs both as a dry run
+// (delivery.yaml `deploy.dry_run`): the same jobs and steps, on a candidate
+// of its own that is always torn down. The deploy itself is exercised through
 // .github/scripts/deploy-candidate.mjs with a strict fake docker and a fake
 // /healthz: the candidate runs as deploy/base/deployment.yaml and the schema
 // Job declare it. Nothing here reaches docker, GitHub or a cluster.
@@ -14,9 +17,9 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, matchesGlob } from "node:path";
 import { parse, stringify } from "yaml";
-import { deployCandidate, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
+import { CANDIDATE_INPUTS, deployCandidate, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
 import { repoRoot, runCommands, testSelection, words } from "./selection.ts";
 
 type Obj = Record<string, any>;
@@ -81,7 +84,8 @@ test("the journeys are their own selection, run only by the deploy job", () => {
   for (const f of readdirSync(join(repoRoot, ".github", "workflows"))) {
     for (const { job, run } of runCommands(yamlFile(".github", "workflows", f))) {
       const ran = testSelection(run, scripts).filter((x) => repoJourneys.includes(x));
-      if (`.github/workflows/${f}` === delivery["deploy"]["workflow"] && job === delivery["deploy"]["job"]) continue;
+      const deployJob = job === delivery["deploy"]["job"];
+      if (deployJob && [delivery["deploy"]["workflow"], delivery["deploy"]["dry_run"]?.["workflow"]].includes(`.github/workflows/${f}`)) continue;
       assert.deepEqual(ran, [], `${f} job ${job} runs journeys without a deployed candidate`);
     }
   }
@@ -239,6 +243,73 @@ test("the candidate follows the manifests: a Deployment env the candidate cannot
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * The files whose change changes what the deploy queue's jobs do: both workflows, every repository script a
+ * job step runs, the journeys, the declaration and npm scripts the steps resolve through, the Dockerfile the
+ * candidate is built from, and every manifest and directory deploy-candidate.mjs reads to run the candidate.
+ */
+function queueFiles(): string[] {
+  const d = delivery["deploy"] as Obj;
+  const files = new Set<string>([d["workflow"], d["dry_run"]["workflow"], "delivery.yaml", "package.json", "Dockerfile"]);
+  for (const { run } of runCommands(yamlFile(d["workflow"]))) {
+    for (const w of words(run.replace(/\n/g, " "))) if (w.startsWith(".github/scripts/")) files.add(w);
+  }
+  for (const f of testSelection(d["journeys"]["command"], scripts)) files.add(f);
+  for (const input of Object.values(CANDIDATE_INPUTS)) {
+    const inside = repoFiles.filter((f) => f === input || f.startsWith(`${input}/`));
+    assert.ok(inside.length > 0, `the candidate input ${input} is not in the repository`);
+    for (const f of inside) files.add(f);
+  }
+  return [...files].sort();
+}
+
+test("a pull request that changes the deploy queue runs its batch and deploy jobs as a dry run", () => {
+  const d = delivery["deploy"] as Obj;
+  const path = d["dry_run"]?.["workflow"];
+  assert.equal(typeof path, "string", "delivery.yaml deploy.dry_run names no workflow");
+  const queue = yamlFile(d["workflow"]);
+  const dry = yamlFile(path);
+
+  // It runs on a plain pull request (never pull_request_target), only when the queue itself changes.
+  assert.deepEqual(Object.keys(dry["on"] ?? {}), ["pull_request"]);
+  const paths = dry["on"]["pull_request"]?.["paths"] as string[];
+  assert.ok(Array.isArray(paths) && paths.length > 0, "the dry run has no paths filter, so it would run E2E on every pull request");
+  const matched = (f: string): boolean => paths.some((p) => matchesGlob(f, p));
+  for (const f of queueFiles()) assert.ok(matched(f), `a pull request changing ${f} does not run the dry run`);
+  // An ordinary change still waits for the batch (delivery.yaml e2e.runs once_per_batch).
+  for (const f of ["src/main.ts", "tests/api/loops.test.ts", "docs/EXTERNAL-REVIEW.md"]) assert.ok(!matched(f), `${f} runs the dry run`);
+
+  // It never queues behind, or displaces, a batch waiting in the deploy group.
+  assert.notEqual(String(dry["concurrency"]?.["group"]), String(queue["concurrency"]["group"]));
+  assert.match(String(dry["concurrency"]?.["group"]), /\$\{\{ github\.ref \}\}/, "dry runs of different pull requests share a group");
+  assert.deepEqual(dry["permissions"], queue["permissions"]);
+
+  // The same jobs, needs, conditions, permissions and steps as the queue; each names the job it dry-runs.
+  const queueJobs = queue["jobs"] as Obj;
+  const dryJobs = dry["jobs"] as Obj;
+  assert.deepEqual(Object.keys(dryJobs), Object.keys(queueJobs));
+  for (const [name, job] of Object.entries(queueJobs) as [string, Obj][]) {
+    const { env: dryEnv = {}, ...dryRest } = dryJobs[name] as Obj;
+    const { env: queueEnv = {}, ...queueRest } = job;
+    assert.deepEqual(dryRest, queueRest, `the dry run's ${name} job differs from the queue's`);
+    assert.equal(dryEnv["DRY_RUN_OF"], name, `the dry run's ${name} job does not declare DRY_RUN_OF: ${name}`);
+    const { DRY_RUN_OF: _of, CANDIDATE_NAME: dryName, ...dryOther } = dryEnv;
+    const { CANDIDATE_NAME: queueName, ...queueOther } = queueEnv;
+    assert.deepEqual(dryOther, queueOther, `the dry run's ${name} job env differs from the queue's`);
+    assert.equal(dryName === undefined, queueName === undefined);
+  }
+
+  // Its candidate is its own: per pull request and run attempt, apart from any batch's, and a name
+  // deploy-candidate.mjs accepts for teardown.
+  const name = String(dryJobs[d["job"]]["env"]["CANDIDATE_NAME"]);
+  assert.equal(name, "lc-candidate-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}");
+  const concrete = name.replace("${{ github.event.pull_request.number }}", "89").replace("${{ github.run_id }}", "123").replace("${{ github.run_attempt }}", "2");
+  assert.doesNotMatch(concrete, /^lc-candidate-\d+-\d+$/, "the dry run's candidate has a batch candidate's name");
+  const calls: string[][] = [];
+  removeCandidate({ name: concrete, docker: fakeDocker(calls) });
+  assert.deepEqual(calls.at(-1), ["network", "rm", "lc-candidate-pr-89-123-2", "#nocheck"]);
 });
 
 test("teardown removes the candidate's containers, volumes and network, tolerating what is already gone", () => {

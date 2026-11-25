@@ -35,6 +35,18 @@ const NAME = /^lc-candidate-[a-z0-9][a-z0-9_.-]*$/;
 const OWNER = "joe";
 const HEALTH_TIMEOUT_MS = 5_000;
 
+/**
+ * Every repository file and directory candidateShape reads to run the candidate. A pull request changing
+ * one changes the candidate, so the deploy queue's dry run (deploy-dry-run.yml) runs on it.
+ */
+export const CANDIDATE_INPUTS = Object.freeze({
+  compose: "compose.yaml",
+  deployment: "deploy/base/deployment.yaml",
+  schemaJob: "deploy/overlays/aks-obs-01/schema-job.yaml",
+  scopes: "deploy/base/api-scopes",
+  initdb: "infra/postgres/initdb",
+});
+
 /** Runs docker; returns stdout, throws on a non-zero exit unless `check` is false. */
 function realDocker(args, { check = true } = {}) {
   try {
@@ -45,8 +57,8 @@ function realDocker(args, { check = true } = {}) {
   }
 }
 
-function yamlAt(root, ...parts) {
-  return parse(readFileSync(join(root, ...parts), "utf8"));
+function yamlAt(root, path) {
+  return parse(readFileSync(join(root, path), "utf8"));
 }
 
 /** How a manifest's container runs, as docker run options: user, read-only root, capabilities, privilege escalation. */
@@ -82,9 +94,9 @@ function containerOf(podSpec, name, file) {
 
 /** The candidate's shape, read from compose.yaml and the estate manifests. */
 export function candidateShape(root = REPO_ROOT) {
-  const compose = yamlAt(root, "compose.yaml").services.postgres;
-  const deployment = yamlAt(root, "deploy", "base", "deployment.yaml");
-  const job = yamlAt(root, "deploy", "overlays", "aks-obs-01", "schema-job.yaml");
+  const compose = yamlAt(root, CANDIDATE_INPUTS.compose).services.postgres;
+  const deployment = yamlAt(root, CANDIDATE_INPUTS.deployment);
+  const job = yamlAt(root, CANDIDATE_INPUTS.schemaJob);
 
   const apiPod = deployment.spec.template.spec;
   const api = containerOf(apiPod, "api", "deployment.yaml");
@@ -103,11 +115,11 @@ export function candidateShape(root = REPO_ROOT) {
       image: compose.image,
       user: compose.environment.POSTGRES_USER,
       database: compose.environment.POSTGRES_DB,
-      initdb: join(root, "infra", "postgres", "initdb"),
+      initdb: join(root, CANDIDATE_INPUTS.initdb),
     },
     migrate: runOptions(jobPod, migrate),
     api: { ...runOptions(apiPod, api), env: literalEnv(api), port, keysPath: mounts["api-keys"], scopesPath: mounts["api-scopes"] },
-    scopesDir: join(root, "deploy", "base", "api-scopes"),
+    scopesDir: join(root, CANDIDATE_INPUTS.scopes),
   };
 }
 

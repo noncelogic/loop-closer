@@ -1,0 +1,119 @@
+name: deploy-dry-run
+
+# The pull-request dry run of the deploy queue, .github/workflows/deploy.yml
+# (COND-342; policy main-stays-green; delivery.yaml `deploy.dry_run`). The
+# queue runs only on its schedule, so without this a change to its `batch` or
+# `deploy` job, to the scripts they run, to the journeys or to the files the
+# candidate is built and deployed from would first run after it landed. A pull
+# request that changes any of them runs both jobs here, as the queue runs them:
+# the same steps (tests/delivery/deploy.test.ts compares them), each job naming
+# the queue job it dry-runs in DRY_RUN_OF. `batch` reads the last successful
+# batch on main exactly as a batch does; the pull request's merge commit is
+# never main's head, so `deploy` then builds that commit's image, deploys it
+# as a candidate of its own (lc-candidate-pr-<number>-<run>-<attempt>: its own
+# network, Postgres, volumes and fresh keys), runs the E2E suite and the
+# journeys against it and always tears it down. Pushes no image, touches no
+# cluster and reads no secret.
+#
+# Only pull requests that change the queue run it (the paths below), so an
+# ordinary change still reaches E2E once per batch (delivery.yaml e2e.runs;
+# Rule: policies/placement-defaults.yaml#gates). It is not a required check:
+# a red dry run blocks only by review, as a red batch becomes the next fix task.
+# Plain pull_request only, never pull_request_target. Runs on the self-hosted
+# org scale set (Rule: policies/placement-defaults.yaml#estate).
+on:
+  pull_request:
+    paths:
+      - .github/workflows/deploy.yml
+      - .github/workflows/deploy-dry-run.yml
+      - .github/scripts/delivery-batch.mjs
+      - .github/scripts/deploy-candidate.mjs
+      - .github/scripts/estate-image-smoke.sh
+      - tests/journeys/**
+      - delivery.yaml
+      - package.json
+      - Dockerfile
+      - compose.yaml
+      - deploy/base/deployment.yaml
+      - deploy/overlays/aks-obs-01/schema-job.yaml
+      - deploy/base/api-scopes/**
+      - infra/postgres/initdb/**
+
+permissions:
+  contents: read
+
+# One dry run per pull request at a time, apart from the batches' `deploy`
+# group, so a dry run never queues behind or displaces a waiting batch.
+concurrency:
+  group: deploy-dry-run-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      DRY_RUN_OF: batch
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      since: ${{ steps.decide.outputs.since }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: decide
+        name: Decide whether main moved since the last successful batch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/delivery-batch.mjs
+
+  deploy:
+    needs: batch
+    if: ${{ needs.batch.outputs.run == 'true' }}
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DRY_RUN_OF: deploy
+      CANDIDATE_IMAGE: loopcloser:candidate-${{ github.sha }}
+      CANDIDATE_NAME: lc-candidate-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # The candidate: the batch head's image, built here and never pushed.
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+      - name: Run the portal-read entrypoint in the candidate image
+        run: bash .github/scripts/estate-image-smoke.sh "$CANDIDATE_IMAGE" node dist/portal-read.js
+      # Sets CANDIDATE_URL and CANDIDATE_KEYS_DIR for the journeys.
+      - name: Deploy the candidate
+        run: node .github/scripts/deploy-candidate.mjs up "$CANDIDATE_IMAGE" "$CANDIDATE_NAME"
+      # The suites that boot the real service and Postgres (Compose replica):
+      # tests/**/*.e2e.ts, which `npm test` (*.test.ts, ci.yml) never selects.
+      - name: Run the end-to-end suite
+        run: npm run test:e2e
+      # tests/journeys/**/*.journey.ts, against the deployed candidate's API.
+      - name: Run the journeys against the candidate
+        run: npm run test:journeys
+      - name: Tear down the candidate
+        if: ${{ always() }}
+        run: node .github/scripts/deploy-candidate.mjs down "$CANDIDATE_NAME"

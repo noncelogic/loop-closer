@@ -5,7 +5,8 @@
 // deploy workflow (the deploy queue) fires on that interval (its cron is derived from the
 // declared seconds), its runs never overlap, and its E2E job runs only when
 // main moved since the last successful batch, never per push or per pull
-// request: the test files each workflow step executes are resolved from
+// request (only a pull request that changes the queue itself runs its dry
+// run, deploy-dry-run.yml; tests/delivery/deploy.test.ts): the test files each workflow step executes are resolved from
 // package.json's scripts and node --test patterns, and no ci.yml or
 // estate-image.yml step selects an E2E file. The interval is an estimate, so the declaration carries its basis
 // and the measurement that revisits it (estimates-are-measured-and-revisited).
