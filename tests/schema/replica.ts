@@ -3,7 +3,7 @@
 // versioned migrations in db/migrations in order, and runs SQL through psql
 // inside the container — no Postgres client dependency on the host.
 //
-// Requires Docker with the Compose plugin, like tests/foundation/local-replica.test.ts.
+// Requires Docker with the Compose plugin, like tests/foundation/local-replica.e2e.ts.
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";

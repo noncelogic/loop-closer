@@ -1,0 +1,35 @@
+# Delivery guarantee of loop-closer (COND-344; owner INTENTS I67,
+# DELIVERY-GUARANTEE-CHECK; Rule: policies/placement-defaults.yaml#gates).
+#
+# `batch`: merges to main are not verified end to end one by one. They queue
+# on main and the end-to-end suite runs once per batch, on one fixed interval
+# for the product. The per-pull-request gate (ci.yml `gate`) stays as it is;
+# the E2E batch runs outside it, and a red batch becomes the next fix task.
+# Checked by tests/delivery/batch.test.ts.
+delivery_guarantee: batch
+
+deploy_queue:
+  # One fixed interval for the product. The delivery-batch workflow's cron is
+  # derived from it (tests/delivery/batch.test.ts cronFor).
+  interval_seconds: 3600
+  # The interval is an estimate (estimates-are-measured-and-revisited).
+  basis: >-
+    Estimate. loop-closer merges about five pull requests a day (#46..#85,
+    40 merges over 2026-11-16..2026-11-23), and one E2E batch (build,
+    Compose replica, end-to-end suite, image smoke) is expected to take well
+    under the 30-minute job timeout. Hourly keeps a merged change at most an
+    hour from end-to-end evidence while running E2E far fewer times than per merge.
+  revisit: >-
+    Measured from the delivery-batch runs (gh run list --workflow
+    delivery-batch.yml): revisit when the E2E job's duration exceeds half the
+    interval, or when batches routinely carry more than five commits or are
+    mostly empty.
+
+e2e:
+  runs: once_per_batch
+  workflow: .github/workflows/delivery-batch.yml
+  job: e2e
+  # Selects tests/**/*.e2e.ts. `npm test` (*.test.ts), which ci.yml runs on
+  # every pull request and main push, selects none of them, so E2E runs only
+  # here (tests/delivery/batch.test.ts testSelection).
+  command: npm run test:e2e
