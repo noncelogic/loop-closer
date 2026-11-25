@@ -150,31 +150,60 @@ function runCommands(wf: Obj): Array<{ job: string; run: string }> {
 
 const scripts = (JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as Obj)["scripts"] as Record<string, string>;
 
-test("E2E runs only in the batch, never in a per-push or per-pull-request test selection", () => {
-  const d = yamlFile("delivery.yaml");
-  const e2eFiles = testSelection(d["e2e"]["command"], scripts);
-  assert.ok(e2eFiles.length > 0, `${d["e2e"]["command"]} selects no test file`);
+/** Every E2E file in the repository: each tracked *.e2e.ts file, wherever it lives. */
+const repoE2eFiles = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: repoRoot, encoding: "utf8" })
+  .split("\0")
+  .filter((f) => f.endsWith(".e2e.ts"))
+  .sort();
 
-  // The batch's E2E job executes exactly the declared E2E selection, once.
-  const batchWf = yamlFile(d["e2e"]["workflow"]);
-  const byJob = new Map<string, string[]>();
-  for (const { job, run } of runCommands(batchWf)) byJob.set(job, [...(byJob.get(job) ?? []), ...testSelection(run, scripts)]);
-  assert.deepEqual(byJob.get(d["e2e"]["job"]), e2eFiles, `${d["e2e"]["job"]} runs the E2E selection once`);
-  for (const [job, files] of byJob) if (job !== d["e2e"]["job"]) assert.deepEqual(files, [], `${job} runs no test`);
+/** Whether a workflow runs on pull requests or main pushes (its `on` names push or pull_request). */
+function perMergeWorkflow(wf: Obj): boolean {
+  const on = wf["on"] ?? {};
+  const triggers = typeof on === "string" ? [on] : Array.isArray(on) ? on : Object.keys(on as Obj);
+  return triggers.some((t) => t === "push" || t === "pull_request" || t === "pull_request_target");
+}
 
-  // No per-push or per-pull-request workflow step executes any E2E file.
+test("the test selection ci.yml executes on pull requests and main pushes contains no E2E file", () => {
+  assert.ok(repoE2eFiles.length > 0, "the repository has no *.e2e.ts file");
+  // `npm test` itself, the per-pull-request suite ci.yml runs, selects no E2E file and still selects tests.
+  const npmTest = testSelection("npm test", scripts);
+  assert.ok(npmTest.length > 0, "npm test selects no test file");
+  assert.deepEqual(npmTest.filter((f) => repoE2eFiles.includes(f) || f.endsWith(".e2e.ts")), [], "npm test selects E2E files");
+
+  // Every step of every workflow that runs on a pull request or a main push.
+  const ci = yamlFile(".github", "workflows", "ci.yml");
+  assert.ok(perMergeWorkflow(ci), "ci.yml runs on pull requests and main pushes");
+  assert.ok(runCommands(ci).some(({ run }) => run.trim() === "npm test"), "ci.yml runs npm test");
   let selected = 0;
   for (const f of ["ci.yml", "estate-image.yml"]) {
-    for (const { job, run } of runCommands(yamlFile(".github", "workflows", f))) {
+    const wf = yamlFile(".github", "workflows", f);
+    for (const { job, run } of runCommands(wf)) {
       const files = testSelection(run, scripts);
       selected += files.length;
-      const overlap = files.filter((x) => e2eFiles.includes(x));
-      assert.deepEqual(overlap, [], `${f} job ${job} (${JSON.stringify(run)}) runs E2E files`);
+      assert.deepEqual(files.filter((x) => repoE2eFiles.includes(x)), [], `${f} job ${job} (${JSON.stringify(run)}) runs E2E files`);
     }
+  }
+  assert.ok(selected > 0, "ci.yml selects no test file at all");
+});
+
+test("the batch E2E selection executes every E2E file exactly once", () => {
+  const d = yamlFile("delivery.yaml");
+  const e2eFiles = testSelection(d["e2e"]["command"], scripts);
+  // The declared E2E selection is exactly the repository's E2E files: none left out, nothing else.
+  assert.deepEqual(e2eFiles, repoE2eFiles, `${d["e2e"]["command"]} selects every E2E file and only those`);
+
+  // The batch's E2E job executes that selection once (its steps' selections concatenated, duplicates kept).
+  const batchWf = yamlFile(d["e2e"]["workflow"]);
+  assert.equal(perMergeWorkflow(batchWf), false, `${d["e2e"]["workflow"]} runs per merge`);
+  const byJob = new Map<string, string[]>();
+  for (const { job, run } of runCommands(batchWf)) byJob.set(job, [...(byJob.get(job) ?? []), ...testSelection(run, scripts)]);
+  assert.deepEqual([...(byJob.get(d["e2e"]["job"]) ?? [])].sort(), repoE2eFiles, `${d["e2e"]["job"]} runs each E2E file exactly once`);
+  for (const [job, files] of byJob) if (job !== d["e2e"]["job"]) assert.deepEqual(files, [], `${job} runs no test`);
+
+  // No other workflow has the E2E job.
+  for (const f of ["ci.yml", "estate-image.yml"]) {
     assert.equal((yamlFile(".github", "workflows", f)["jobs"] as Obj)[d["e2e"]["job"]], undefined, `${f} has no ${d["e2e"]["job"]} job`);
   }
-  // The per-pull-request suite still runs (the selection is resolved, not empty).
-  assert.ok(selected > 0, "ci.yml selects no test file at all");
 });
 
 test("test selection resolves npm scripts and node --test patterns", () => {
