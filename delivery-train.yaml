@@ -1,0 +1,19 @@
+# Delivery train of loop-closer: what serves it (LC-TRAIN-SERVING, CLOSER-345;
+# DELIVERY-GUARANTEE-CHECK; Rule: policies/placement-defaults.yaml#estate,
+# deploys_by Argo CD from Git).
+#
+# `serving.argocd` names the Argo CD Application that serves loop-closer, so the
+# check measures which revision of this repository it runs. The facts are those
+# of devops/aks/loop-closer-argo/application.yaml: Application loop-closer in
+# namespace argocd on aks-obs-01, source noncelogic/loop-closer at main, path
+# deploy/overlays/aks-obs-01 (recorded Synced and Healthy in
+# devops/loop-closer/2026-11-20-aks-obs-01-rollout.md).
+# Checked by test/delivery-train.test.ts.
+serving:
+  argocd:
+    application: loop-closer
+    namespace: argocd
+    cluster: aks-obs-01
+    repo: noncelogic/loop-closer
+    revision: main
+    path: deploy/overlays/aks-obs-01
