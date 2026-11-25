@@ -15,10 +15,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { batchDecision, BATCH_WORKFLOW } from "../../.github/scripts/delivery-batch.mjs";
+import { batchDecision, BATCH_WORKFLOW, runBatch } from "../../.github/scripts/delivery-batch.mjs";
 import { repoRoot, runCommands, testSelection } from "./selection.ts";
 
 type Obj = Record<string, any>;
@@ -254,4 +255,64 @@ test("an unreadable batch history fails loudly instead of guessing", async () =>
   const malformed = github({ status: 200, body: { workflow_runs: "nope" } }, []);
   await assert.rejects(batchDecision({ repo: REPO, headSha: "bbb", token: "t0ken", fetch: malformed }), /workflow_runs/);
   await assert.rejects(batchDecision({ repo: REPO, headSha: "", token: "t0ken", fetch: malformed }), /head sha/);
+});
+
+/** A fake GitHub for a run of the batch step that must read no live history: it fails every request. */
+function noGithub(seen: string[]) {
+  return async (url: string | URL): Promise<Response> => {
+    seen.push(String(url));
+    throw new Error(`unexpected live history read ${String(url)}`);
+  };
+}
+
+/** Runs the batch step (runBatch, as `node delivery-batch.mjs` does) with `env`; returns its GITHUB_OUTPUT. */
+async function batchStep(env: Record<string, string>, fetch: (url: string, init?: RequestInit) => Promise<Response>): Promise<Record<string, string>> {
+  const dir = mkdtempSync(join(tmpdir(), "lc-batch-test-"));
+  try {
+    const output = join(dir, "output");
+    writeFileSync(output, "");
+    await runBatch({
+      env: { GITHUB_REPOSITORY: REPO, GITHUB_SHA: "bbb", GITHUB_TOKEN: "t0ken", GITHUB_OUTPUT: output, ...env },
+      fetch,
+      log: () => {},
+    });
+    const out: Record<string, string> = {};
+    for (const line of readFileSync(output, "utf8").split("\n").filter(Boolean)) {
+      const [k, ...v] = line.split("=");
+      out[k!] = v.join("=");
+    }
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the dry run's batch job decides a first batch without reading the queue's history, so its deploy job runs", async () => {
+  // deploy.yml is new on the pull request, so GitHub has no history for it (HTTP 404): the dry run's batch
+  // step answers the history read with a first batch instead, through the real decision and GITHUB_OUTPUT.
+  const d = yamlFile("delivery.yaml");
+  const dry = yamlFile(d["deploy"]["dry_run"]["workflow"]);
+  const batch = dry["jobs"]["batch"] as Obj;
+  const step = (batch["steps"] as Obj[]).find((s) => s["id"] === "decide")!;
+  assert.equal(step["run"].trim(), "node .github/scripts/delivery-batch.mjs");
+  const seen: string[] = [];
+  const out = await batchStep({ ...(batch["env"] as Record<string, string>) }, noGithub(seen));
+  assert.deepEqual(seen, [], "the dry run read the live batch history");
+  assert.deepEqual(out, { run: "true", since: "" });
+  // The dry run's deploy job runs on that output.
+  assert.equal(batch["outputs"]["run"], "${{ steps.decide.outputs.run }}");
+  assert.match(String(dry["jobs"][d["deploy"]["job"]]["if"]), /needs\.batch\.outputs\.run\s*==\s*'true'/);
+});
+
+test("the queue's batch job reads the live history and fails on an unreadable one", async () => {
+  const d = yamlFile("delivery.yaml");
+  const env = { ...((yamlFile(d["deploy"]["workflow"])["jobs"]["batch"] as Obj)["env"] ?? {}) } as Record<string, string>;
+  assert.equal(env["DRY_RUN_OF"], undefined, "the queue's batch job is a dry run");
+  const seen: string[] = [];
+  const live = github({ status: 200, body: { total_count: 1, workflow_runs: [{ id: 7, head_sha: "aaa" }] } }, seen);
+  assert.deepEqual(await batchStep(env, live), { run: "true", since: "aaa" });
+  assert.deepEqual(seen, [RUNS_URL]);
+  await assert.rejects(batchStep(env, github({ status: 404, body: { message: "Not Found" } }, [])), /HTTP 404/);
+  // A step that names another job as the one it dry-runs is refused, never read as the queue's batch.
+  await assert.rejects(batchStep({ DRY_RUN_OF: "deploy" }, noGithub([])), /DRY_RUN_OF/);
 });

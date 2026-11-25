@@ -98,6 +98,8 @@ jobs:
         run: node .github/scripts/deploy-candidate.mjs up "$CANDIDATE_IMAGE" "$CANDIDATE_NAME"
       # The suites that boot the real service and Postgres (Compose replica):
       # tests/**/*.e2e.ts, which `npm test` (*.test.ts, ci.yml) never selects.
+      # The E2E suite boots its Postgres replica with `docker compose`.
+      - uses: docker/setup-compose-action@v1
       - name: Run the end-to-end suite
         run: npm run test:e2e
       # tests/journeys/**/*.journey.ts, against the deployed candidate's API.

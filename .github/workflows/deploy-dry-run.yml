@@ -7,13 +7,16 @@ name: deploy-dry-run
 # candidate is built and deployed from would first run after it landed. A pull
 # request that changes any of them runs both jobs here, as the queue runs them:
 # the same steps (tests/delivery/deploy.test.ts compares them), each job naming
-# the queue job it dry-runs in DRY_RUN_OF. `batch` reads the last successful
-# batch on main exactly as a batch does; the pull request's merge commit is
-# never main's head, so `deploy` then builds that commit's image, deploys it
+# the queue job it dry-runs in DRY_RUN_OF. `batch` runs the batch decision and
+# output as a batch does, but with DRY_RUN_OF=batch delivery-batch.mjs answers
+# its history read with a first batch instead of reading GitHub (deploy.yml may
+# not have run on main yet, and GitHub answers 404 for it; the queue's own
+# reads still fail on that). `deploy` then builds the merge commit's image, deploys it
 # as a candidate of its own (lc-candidate-pr-<number>-<run>-<attempt>: its own
 # network, Postgres, volumes and fresh keys), runs the E2E suite and the
 # journeys against it and always tears it down. Pushes no image, touches no
-# cluster and reads no secret.
+# cluster and reads no secret. The paths include the lockfile and migrations
+# the candidate image is built from and applies at startup.
 #
 # Only pull requests that change the queue run it (the paths below), so an
 # ordinary change still reaches E2E once per batch (delivery.yaml e2e.runs;
@@ -32,7 +35,9 @@ on:
       - tests/journeys/**
       - delivery.yaml
       - package.json
+      - package-lock.json
       - Dockerfile
+      - db/migrations/**
       - compose.yaml
       - deploy/base/deployment.yaml
       - deploy/overlays/aks-obs-01/schema-job.yaml
@@ -109,6 +114,8 @@ jobs:
         run: node .github/scripts/deploy-candidate.mjs up "$CANDIDATE_IMAGE" "$CANDIDATE_NAME"
       # The suites that boot the real service and Postgres (Compose replica):
       # tests/**/*.e2e.ts, which `npm test` (*.test.ts, ci.yml) never selects.
+      # The E2E suite boots its Postgres replica with `docker compose`.
+      - uses: docker/setup-compose-action@v1
       - name: Run the end-to-end suite
         run: npm run test:e2e
       # tests/journeys/**/*.journey.ts, against the deployed candidate's API.

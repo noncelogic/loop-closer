@@ -51,8 +51,8 @@ deploy:
     # (tests/delivery/deploy.test.ts).
     command: npm run test:journeys
   # A pull request that changes the queue (its jobs, their scripts, the
-  # journeys, the candidate's Dockerfile and manifests) runs `batch` and
-  # `deploy` as a dry run: the same steps, on a candidate of its own,
-  # always torn down. Ordinary pull requests do not run it.
+  # journeys, the candidate's Dockerfile, lockfile, migrations and manifests)
+  # runs `batch` and `deploy` as a dry run: the same steps, on a candidate of
+  # its own, always torn down. Ordinary pull requests do not run it.
   dry_run:
     workflow: .github/workflows/deploy-dry-run.yml

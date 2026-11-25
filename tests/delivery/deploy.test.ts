@@ -70,6 +70,10 @@ test("the deploy job builds the batch head, deploys it, runs its E2E and journey
   const journeys = at((s) => s["run"]?.trim() === d["journeys"]["command"], "runs the journeys");
   const down = at((s) => run(s).join(" ") === "node .github/scripts/deploy-candidate.mjs down $CANDIDATE_NAME", "tears the candidate down");
   assert.ok(build < up && up < e2e && e2e < journeys && journeys < down, "build, deploy, E2E, journeys, teardown in that order");
+  // The E2E suite boots its Postgres replica with `docker compose` (tests/schema/replica.ts,
+  // tests/foundation/local-replica.e2e.ts), so the job provisions the Compose plugin before it runs.
+  const compose = at((s) => String(s["uses"]).startsWith("docker/setup-compose-action@"), "provisions the Docker Compose plugin");
+  assert.ok(compose < e2e, "Compose is provisioned before the E2E suite runs");
   assert.equal(down, steps.length - 1, "teardown is the last step");
   assert.match(String(steps[down]!["if"]), /^\$\{\{\s*always\(\)\s*\}\}$|^always\(\)$/, "teardown runs even when a check failed");
   assert.deepEqual(job["permissions"], { contents: "read" }, "the deploy job reads the repository and nothing else");
@@ -245,14 +249,24 @@ test("the candidate follows the manifests: a Deployment env the candidate cannot
   }
 });
 
+/** Files the candidate image consumes that change what its deploy does, not only the code the batch verifies. */
+const CANDIDATE_IMAGE_INPUTS = ["package-lock.json", "db/migrations"];
+
 /**
  * The files whose change changes what the deploy queue's jobs do: both workflows, every repository script a
  * job step runs, the journeys, the declaration and npm scripts the steps resolve through, the Dockerfile the
- * candidate is built from, and every manifest and directory deploy-candidate.mjs reads to run the candidate.
+ * candidate is built from with its lockfile and migrations, and every manifest and directory deploy-candidate.mjs reads to run the candidate.
  */
 function queueFiles(): string[] {
   const d = delivery["deploy"] as Obj;
   const files = new Set<string>([d["workflow"], d["dry_run"]["workflow"], "delivery.yaml", "package.json", "Dockerfile"]);
+  // What the candidate image is built from beyond the source the batch verifies: the lockfile `npm ci` installs
+  // (in the job and in the Dockerfile) and the migrations the candidate's migrate applies at startup.
+  for (const input of CANDIDATE_IMAGE_INPUTS) {
+    const inside = repoFiles.filter((f) => f === input || f.startsWith(`${input}/`));
+    assert.ok(inside.length > 0, `the candidate image input ${input} is not in the repository`);
+    for (const f of inside) files.add(f);
+  }
   for (const { run } of runCommands(yamlFile(d["workflow"]))) {
     for (const w of words(run.replace(/\n/g, " "))) if (w.startsWith(".github/scripts/")) files.add(w);
   }
