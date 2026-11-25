@@ -29,4 +29,7 @@ e2e:
   runs: once_per_batch
   workflow: .github/workflows/delivery-batch.yml
   job: e2e
+  # Selects tests/**/*.e2e.ts. `npm test` (*.test.ts), which ci.yml runs on
+  # every pull request and main push, selects none of them, so E2E runs only
+  # here (tests/delivery/batch.test.ts testSelection).
   command: npm run test:e2e

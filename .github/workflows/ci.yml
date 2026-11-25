@@ -40,7 +40,9 @@ jobs:
         run: bash .github/scripts/install-k8s-tools.sh
       - run: npm run typecheck
       - run: npm run build
-      # Includes tests/foundation/local-replica.test.ts, which uses Docker Compose.
+      # The per-pull-request suite (*.test.ts). The end-to-end suites (*.e2e.ts)
+      # are not in it: they run once per batch in delivery-batch.yml (COND-344,
+      # delivery.yaml; Rule: policies/placement-defaults.yaml#gates).
       - run: npm test
 
   # Renders every kustomize overlay and validates it with kubectl client-side

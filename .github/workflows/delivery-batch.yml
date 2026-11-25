@@ -69,7 +69,8 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run build
-      # The suites that boot the real service and Postgres (Compose replica).
+      # The suites that boot the real service and Postgres (Compose replica):
+      # tests/**/*.e2e.ts, which `npm test` (*.test.ts, ci.yml) never selects.
       - run: npm run test:e2e
       # The batch's image, built and started as its CronJob would start it.
       - uses: docker/setup-buildx-action@v3

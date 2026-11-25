@@ -5,14 +5,16 @@
 // delivery-batch workflow fires on that interval (its cron is derived from the
 // declared seconds), its runs never overlap, and its E2E job runs only when
 // main moved since the last successful batch, never per push or per pull
-// request. The interval is an estimate, so the declaration carries its basis
+// request: the test files each workflow step executes are resolved from
+// package.json's scripts and node --test patterns, and no ci.yml or
+// estate-image.yml step selects an E2E file. The interval is an estimate, so the declaration carries its basis
 // and the measurement that revisits it (estimates-are-measured-and-revisited).
 // The batch decision is exercised through .github/scripts/delivery-batch.mjs
 // with a strict fake transport; nothing here reaches GitHub or a runner.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { batchDecision, BATCH_WORKFLOW } from "../../.github/scripts/delivery-batch.mjs";
@@ -102,12 +104,87 @@ test("the delivery-batch workflow runs E2E once per declared interval", () => {
   assert.deepEqual(batch["permissions"], { actions: "read", contents: "read" });
 });
 
-test("E2E stays out of the per-push and per-pull-request workflows", () => {
-  const d = yamlFile("delivery.yaml");
-  for (const f of ["ci.yml", "estate-image.yml"]) {
-    const jobs = yamlFile(".github", "workflows", f)["jobs"] as Obj;
-    assert.equal(jobs[d["e2e"]["job"]], undefined, `${f} has no ${d["e2e"]["job"]} job`);
+/** Split a shell command line into words, honouring single and double quotes (no expansion). */
+function words(line: string): string[] {
+  const out: string[] = [];
+  for (const m of line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) out.push(m[1] ?? m[2] ?? m[3]!);
+  return out;
+}
+
+/**
+ * The test files a workflow `run:` command executes: `npm test` and `npm run <script>` resolve through
+ * package.json's scripts, and `node --test <patterns>` expands its patterns the way node does (fs.globSync
+ * from the repository root). Any other command executes no test file.
+ */
+export function testSelection(command: string, scripts: Record<string, string>, seen: string[] = []): string[] {
+  const files = new Set<string>();
+  for (const part of command.split(/\n|&&|\|\||;/)) {
+    const w = words(part.trim());
+    let script: string | undefined;
+    if (w[0] === "npm" && (w[1] === "test" || w[1] === "t")) script = "test";
+    else if (w[0] === "npm" && (w[1] === "run" || w[1] === "run-script") && w[2]) script = w[2];
+    if (script !== undefined) {
+      if (seen.includes(script)) throw new Error(`npm script ${script} runs itself`);
+      const body = scripts[script];
+      if (body === undefined) throw new Error(`no npm script ${script}`);
+      for (const f of testSelection(body, scripts, [...seen, script])) files.add(f);
+      continue;
+    }
+    if (w[0] === "node" && w.includes("--test")) {
+      for (const arg of w.slice(1).filter((a) => !a.startsWith("-"))) {
+        for (const f of globSync(arg, { cwd: repoRoot })) files.add(f.split("\\").join("/"));
+      }
+    }
   }
+  return [...files].sort();
+}
+
+/** Every `run:` command of a workflow's jobs, keyed by job. */
+function runCommands(wf: Obj): Array<{ job: string; run: string }> {
+  const out: Array<{ job: string; run: string }> = [];
+  for (const [job, spec] of Object.entries((wf["jobs"] ?? {}) as Obj)) {
+    for (const step of ((spec as Obj)["steps"] ?? []) as Obj[]) if (typeof step["run"] === "string") out.push({ job, run: step["run"] });
+  }
+  return out;
+}
+
+const scripts = (JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as Obj)["scripts"] as Record<string, string>;
+
+test("E2E runs only in the batch, never in a per-push or per-pull-request test selection", () => {
+  const d = yamlFile("delivery.yaml");
+  const e2eFiles = testSelection(d["e2e"]["command"], scripts);
+  assert.ok(e2eFiles.length > 0, `${d["e2e"]["command"]} selects no test file`);
+
+  // The batch's E2E job executes exactly the declared E2E selection, once.
+  const batchWf = yamlFile(d["e2e"]["workflow"]);
+  const byJob = new Map<string, string[]>();
+  for (const { job, run } of runCommands(batchWf)) byJob.set(job, [...(byJob.get(job) ?? []), ...testSelection(run, scripts)]);
+  assert.deepEqual(byJob.get(d["e2e"]["job"]), e2eFiles, `${d["e2e"]["job"]} runs the E2E selection once`);
+  for (const [job, files] of byJob) if (job !== d["e2e"]["job"]) assert.deepEqual(files, [], `${job} runs no test`);
+
+  // No per-push or per-pull-request workflow step executes any E2E file.
+  let selected = 0;
+  for (const f of ["ci.yml", "estate-image.yml"]) {
+    for (const { job, run } of runCommands(yamlFile(".github", "workflows", f))) {
+      const files = testSelection(run, scripts);
+      selected += files.length;
+      const overlap = files.filter((x) => e2eFiles.includes(x));
+      assert.deepEqual(overlap, [], `${f} job ${job} (${JSON.stringify(run)}) runs E2E files`);
+    }
+    assert.equal((yamlFile(".github", "workflows", f)["jobs"] as Obj)[d["e2e"]["job"]], undefined, `${f} has no ${d["e2e"]["job"]} job`);
+  }
+  // The per-pull-request suite still runs (the selection is resolved, not empty).
+  assert.ok(selected > 0, "ci.yml selects no test file at all");
+});
+
+test("test selection resolves npm scripts and node --test patterns", () => {
+  const s = { test: 'node --test "tests/delivery/*.test.ts"', all: "npm test && npm run e2e", e2e: "node --test nope/*.e2e.ts", loop: "npm run loop" };
+  assert.deepEqual(testSelection("npm test", s), ["tests/delivery/batch.test.ts"]);
+  assert.deepEqual(testSelection("npm run all", s), ["tests/delivery/batch.test.ts"]);
+  assert.deepEqual(testSelection("node --test tests/delivery/batch.test.ts", s), ["tests/delivery/batch.test.ts"]);
+  assert.deepEqual(testSelection("npm ci --ignore-scripts\nnpm run lint", { ...s, lint: "echo lint" }), []);
+  assert.throws(() => testSelection("npm run loop", s), /runs itself/);
+  assert.throws(() => testSelection("npm run missing", s), /no npm script missing/);
 });
 
 test("cron is derived exactly from the interval", () => {
