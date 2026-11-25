@@ -1,0 +1,105 @@
+name: deploy
+
+# loop-closer's deploy queue (COND-342, COND-344; delivery.yaml `deploy`,
+# owner INTENTS I67): merges queue on main and, once per batch, the batch head
+# is deployed as a candidate and verified there: the `deploy` job builds its
+# image, deploys it (.github/scripts/deploy-candidate.mjs: its own Postgres,
+# the schema Job's migrate, then the API as deploy/base/deployment.yaml runs
+# it), runs the end-to-end suite and the journeys against it, and always tears
+# it down. Production rollout stays Argo CD from Git (delivery-train.yaml;
+# Rule: policies/placement-defaults.yaml#estate); this workflow touches no
+# cluster, pushes no image and reads no secret.
+#
+# The batch runs on the fixed interval deploy_queue.interval_seconds (3600s, so
+# the cron below is hourly; the two must agree, tests/delivery/batch.test.ts).
+# No push or pull_request trigger: the candidate is never deployed per merge,
+# and the per-pull-request gate stays ci.yml `gate` (Rule:
+# policies/placement-defaults.yaml#gates, slow suites outside the gate). A red
+# batch becomes the next fix task. workflow_dispatch runs a batch on demand.
+#
+# A scheduled run checks out main's head. `batch` reads the last successful
+# run of this workflow and lets `deploy` run only when main moved since then,
+# so an empty batch runs nothing and no commit is verified twice.
+#
+# Every job runs on the self-hosted org scale set (Rule:
+# policies/placement-defaults.yaml#estate). Checked by
+# tests/delivery/batch.test.ts and tests/delivery/deploy.test.ts.
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Batches are serialised; a batch in progress is never cancelled by the next.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      since: ${{ steps.decide.outputs.since }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: decide
+        name: Decide whether main moved since the last successful batch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/delivery-batch.mjs
+
+  deploy:
+    needs: batch
+    if: ${{ needs.batch.outputs.run == 'true' }}
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_IMAGE: loopcloser:candidate-${{ github.sha }}
+      CANDIDATE_NAME: lc-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # The candidate: the batch head's image, built here and never pushed.
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.CANDIDATE_IMAGE }}
+      - name: Run the portal-read entrypoint in the candidate image
+        run: bash .github/scripts/estate-image-smoke.sh "$CANDIDATE_IMAGE" node dist/portal-read.js
+      # Sets CANDIDATE_URL and CANDIDATE_KEYS_DIR for the journeys.
+      - name: Deploy the candidate
+        run: node .github/scripts/deploy-candidate.mjs up "$CANDIDATE_IMAGE" "$CANDIDATE_NAME"
+      # The suites that boot the real service and Postgres (Compose replica):
+      # tests/**/*.e2e.ts, which `npm test` (*.test.ts, ci.yml) never selects.
+      - name: Run the end-to-end suite
+        run: npm run test:e2e
+      # tests/journeys/**/*.journey.ts, against the deployed candidate's API.
+      - name: Run the journeys against the candidate
+        run: npm run test:journeys
+      - name: Tear down the candidate
+        if: ${{ always() }}
+        run: node .github/scripts/deploy-candidate.mjs down "$CANDIDATE_NAME"

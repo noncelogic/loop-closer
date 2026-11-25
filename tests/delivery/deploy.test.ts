@@ -1,0 +1,253 @@
+// COND-342 acceptance (owner INTENTS I67, DELIVERY-GUARANTEE-CHECK; Rule:
+// policies/placement-defaults.yaml#gates): loop-closer has a deploy workflow
+// that is its deploy queue. Once per batch (tests/delivery/batch.test.ts) its
+// deploy job builds the batch head's image, deploys that candidate, runs the
+// E2E suite and the journeys against it, and always tears it down. delivery.yaml
+// `deploy` names the workflow, the job and the journeys command; the journeys
+// are their own selection (tests/journeys/**/*.journey.ts) that no per-merge
+// workflow runs. The deploy itself is exercised through
+// .github/scripts/deploy-candidate.mjs with a strict fake docker and a fake
+// /healthz: the candidate runs as deploy/base/deployment.yaml and the schema
+// Job declare it. Nothing here reaches docker, GitHub or a cluster.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import { parse, stringify } from "yaml";
+import { deployCandidate, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
+import { repoRoot, runCommands, testSelection, words } from "./selection.ts";
+
+type Obj = Record<string, any>;
+
+function yamlFile(...parts: string[]): Obj {
+  return parse(readFileSync(join(repoRoot, ...parts), "utf8")) as Obj;
+}
+
+const delivery = yamlFile("delivery.yaml");
+const scripts = (JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as Obj)["scripts"] as Record<string, string>;
+const repoFiles = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { cwd: repoRoot, encoding: "utf8" })
+  .split("\0")
+  .filter(Boolean);
+
+test("delivery.yaml names the deploy workflow, its job and the journeys, and the queue's E2E runs in that job", () => {
+  const d = delivery["deploy"] as Obj;
+  assert.ok(d && typeof d === "object", "delivery.yaml has no deploy section");
+  assert.equal(d["workflow"], ".github/workflows/deploy.yml");
+  assert.equal(yamlFile(d["workflow"])["name"], "deploy");
+  // The deploy queue's batch E2E is this job's: one job deploys the candidate and verifies it.
+  assert.equal(delivery["e2e"]["workflow"], d["workflow"]);
+  assert.equal(delivery["e2e"]["job"], d["job"]);
+  assert.equal(typeof d["journeys"]?.["command"], "string");
+});
+
+test("the deploy job builds the batch head, deploys it, runs its E2E and journeys, and always tears it down", () => {
+  const d = delivery["deploy"] as Obj;
+  const job = (yamlFile(d["workflow"])["jobs"] as Obj)[d["job"]] as Obj;
+  assert.ok(job, `no ${d["job"]} job`);
+  const steps = job["steps"] as Obj[];
+  const image = job["env"]?.["CANDIDATE_IMAGE"];
+  assert.equal(image, "loopcloser:candidate-${{ github.sha }}", "the candidate is the batch head's image");
+  assert.match(String(job["env"]?.["CANDIDATE_NAME"]), /^lc-candidate-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/);
+
+  const at = (pred: (s: Obj) => boolean, what: string): number => {
+    const i = steps.findIndex(pred);
+    assert.ok(i >= 0, `the ${d["job"]} job has no step that ${what}`);
+    return i;
+  };
+  const run = (s: Obj): string[] => (typeof s["run"] === "string" ? words(s["run"].trim()) : []);
+  const build = at(
+    (s) => String(s["uses"]).startsWith("docker/build-push-action@") && s["with"]?.["push"] === false &&
+      s["with"]?.["load"] === true && s["with"]?.["tags"] === "${{ env.CANDIDATE_IMAGE }}",
+    "builds the candidate image without pushing it",
+  );
+  const up = at((s) => run(s).join(" ") === "node .github/scripts/deploy-candidate.mjs up $CANDIDATE_IMAGE $CANDIDATE_NAME", "deploys the candidate");
+  const e2e = at((s) => s["run"]?.trim() === delivery["e2e"]["command"], "runs the E2E suite");
+  const journeys = at((s) => s["run"]?.trim() === d["journeys"]["command"], "runs the journeys");
+  const down = at((s) => run(s).join(" ") === "node .github/scripts/deploy-candidate.mjs down $CANDIDATE_NAME", "tears the candidate down");
+  assert.ok(build < up && up < e2e && e2e < journeys && journeys < down, "build, deploy, E2E, journeys, teardown in that order");
+  assert.equal(down, steps.length - 1, "teardown is the last step");
+  assert.match(String(steps[down]!["if"]), /^\$\{\{\s*always\(\)\s*\}\}$|^always\(\)$/, "teardown runs even when a check failed");
+  assert.deepEqual(job["permissions"], { contents: "read" }, "the deploy job reads the repository and nothing else");
+});
+
+test("the journeys are their own selection, run only by the deploy job", () => {
+  const repoJourneys = repoFiles.filter((f) => f.endsWith(".journey.ts")).sort();
+  assert.ok(repoJourneys.length > 0, "the repository has no journey");
+  assert.deepEqual(testSelection(delivery["deploy"]["journeys"]["command"], scripts), repoJourneys, "the journeys command selects every journey and only those");
+  assert.deepEqual(testSelection("npm test", scripts).filter((f) => f.endsWith(".journey.ts")), [], "npm test selects a journey");
+
+  for (const f of readdirSync(join(repoRoot, ".github", "workflows"))) {
+    for (const { job, run } of runCommands(yamlFile(".github", "workflows", f))) {
+      const ran = testSelection(run, scripts).filter((x) => repoJourneys.includes(x));
+      if (`.github/workflows/${f}` === delivery["deploy"]["workflow"] && job === delivery["deploy"]["job"]) continue;
+      assert.deepEqual(ran, [], `${f} job ${job} runs journeys without a deployed candidate`);
+    }
+  }
+});
+
+const NAME = "lc-candidate-42-1";
+const IMAGE = "loopcloser:candidate-abc";
+const PW = "pw0";
+const DB_URL = `postgres://loopcloser:${PW}@${NAME}-db:5432/loopcloser`;
+
+/**
+ * A fake docker that answers only the calls a candidate deploy makes and throws on any other.
+ * `pgReadyAfter` failed readiness probes come first; `healthyAfter` failed /healthz answers likewise.
+ */
+function fakeDocker(calls: string[][], opts: { pgReadyAfter?: number; port?: string } = {}): Docker {
+  let probes = 0;
+  return (args, o) => {
+    calls.push(o?.check === false ? [...args, "#nocheck"] : args);
+    const [cmd, sub] = args;
+    if (cmd === "exec" && args.includes("pg_isready")) {
+      if (probes++ < (opts.pgReadyAfter ?? 0)) throw new Error("no response");
+      return "127.0.0.1:5432 - accepting connections\n";
+    }
+    if (cmd === "port") return `${opts.port ?? "127.0.0.1:49153"}\n`;
+    if (cmd === "logs") return "api log line\n";
+    if (cmd === "network" && (sub === "create" || sub === "rm")) return "";
+    if (cmd === "volume" && (sub === "create" || sub === "rm")) return "";
+    if (["create", "cp", "start", "run", "rm"].includes(cmd!)) return "";
+    throw new Error(`unexpected docker call: ${args.join(" ")}`);
+  };
+}
+
+/** A fake API that answers only the candidate's /healthz, failing `failures` times first. */
+function fakeApi(url: string, seen: string[], failures = 0) {
+  let n = 0;
+  return async (u: string | URL): Promise<Response> => {
+    seen.push(String(u));
+    if (String(u) !== `${url}/healthz`) throw new Error(`unexpected request ${String(u)}`);
+    if (n++ < failures) throw new Error("connection refused");
+    return new Response(JSON.stringify({ service: "loopcloser", status: "ok" }), { status: 200 });
+  };
+}
+
+const noSleep = async (): Promise<void> => {};
+
+test("a candidate is deployed as the estate runs it: Postgres, the schema Job's migrate, then the API Deployment", async () => {
+  const keysRoot = mkdtempSync(join(tmpdir(), "lc-deploy-test-"));
+  try {
+    const calls: string[][] = [];
+    const seen: string[] = [];
+    let n = 0;
+    const out = await deployCandidate({
+      image: IMAGE,
+      name: NAME,
+      docker: fakeDocker(calls, { pgReadyAfter: 2 }),
+      fetch: fakeApi("http://127.0.0.1:49153", seen, 1),
+      sleep: noSleep,
+      random: () => (n++ === 0 ? PW : `key${n}`),
+      keysRoot,
+    });
+    assert.equal(out.url, "http://127.0.0.1:49153");
+    assert.deepEqual(out.principals, ["joe", "hermes"]);
+    // Each principal gets its own fresh key, in a new directory under keysRoot.
+    assert.equal(basename(join(out.keysDir, "..")), basename(keysRoot));
+    assert.deepEqual(readdirSync(out.keysDir).sort(), ["hermes", "joe"]);
+    assert.equal(readFileSync(join(out.keysDir, "joe"), "utf8"), "key2\n");
+    assert.equal(readFileSync(join(out.keysDir, "hermes"), "utf8"), "key3\n");
+    assert.deepEqual(seen, ["http://127.0.0.1:49153/healthz", "http://127.0.0.1:49153/healthz"]);
+
+    const probe = ["exec", `${NAME}-db`, "pg_isready", "-h", "127.0.0.1", "-U", "loopcloser", "-d", "loopcloser"];
+    const hardened = ["--user", "1000:1000", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"];
+    assert.deepEqual(calls, [
+      ["network", "create", NAME],
+      ["create", "--name", `${NAME}-db`, "--network", NAME,
+        "--env", "POSTGRES_USER=loopcloser", "--env", `POSTGRES_PASSWORD=${PW}`, "--env", "POSTGRES_DB=loopcloser", "pgvector/pgvector:pg17"],
+      ["cp", `${join(repoRoot, "infra", "postgres", "initdb")}/.`, `${NAME}-db:/docker-entrypoint-initdb.d/`],
+      ["start", `${NAME}-db`],
+      probe, probe, probe,
+      ["volume", "create", `${NAME}-keys`],
+      ["volume", "create", `${NAME}-scopes`],
+      ["create", "--name", `${NAME}-config`, "--volume", `${NAME}-keys:/keys`, "--volume", `${NAME}-scopes:/scopes`, IMAGE],
+      ["cp", `${out.keysDir}/.`, `${NAME}-config:/keys/`],
+      ["cp", `${join(repoRoot, "deploy", "base", "api-scopes")}/.`, `${NAME}-config:/scopes/`],
+      ["rm", `${NAME}-config`],
+      ["run", "--rm", "--name", `${NAME}-migrate`, "--network", NAME, ...hardened,
+        "--env", `DATABASE_URL=${DB_URL}`, "--entrypoint", "node", IMAGE, "dist/migrate.js"],
+      ["run", "--detach", "--name", `${NAME}-api`, "--network", NAME, ...hardened,
+        "--env", "PORT=8080", "--env", `DATABASE_URL=${DB_URL}`,
+        "--volume", `${NAME}-keys:/etc/loopcloser/api-keys:ro`, "--volume", `${NAME}-scopes:/etc/loopcloser/api-scopes:ro`,
+        "--publish", "127.0.0.1::8080", "--entrypoint", "node", IMAGE, "dist/main.js"],
+      ["port", `${NAME}-api`, "8080/tcp"],
+    ]);
+  } finally {
+    rmSync(keysRoot, { recursive: true, force: true });
+  }
+});
+
+test("a candidate whose API never turns healthy fails with the API's log", async () => {
+  const keysRoot = mkdtempSync(join(tmpdir(), "lc-deploy-test-"));
+  try {
+    const calls: string[][] = [];
+    const seen: string[] = [];
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker(calls), fetch: fakeApi("http://127.0.0.1:49153", seen, 99), sleep: noSleep, keysRoot, attempts: 3 }),
+      /never answered \/healthz after 3 attempts; its log:\napi log line/,
+    );
+    assert.equal(seen.length, 3);
+    assert.deepEqual(calls.at(-1), ["logs", `${NAME}-api`, "#nocheck"]);
+  } finally {
+    rmSync(keysRoot, { recursive: true, force: true });
+  }
+});
+
+test("a candidate whose Postgres never comes up, or whose API is not published on loopback, fails", async () => {
+  const keysRoot = mkdtempSync(join(tmpdir(), "lc-deploy-test-"));
+  try {
+    const none = async (u: string | URL): Promise<Response> => {
+      throw new Error(`unexpected request ${String(u)}`);
+    };
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker([], { pgReadyAfter: 99 }), fetch: none, sleep: noSleep, keysRoot, attempts: 4 }),
+      /Postgres of lc-candidate-42-1 is not ready after 4 attempts/,
+    );
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker([], { port: "0.0.0.0:49153" }), fetch: none, sleep: noSleep, keysRoot }),
+      /not published on 127\.0\.0\.1/,
+    );
+    await assert.rejects(deployCandidate({ image: IMAGE, name: "prod", docker: fakeDocker([]), fetch: none, keysRoot }), /not lc-candidate-<id>/);
+    await assert.rejects(deployCandidate({ image: "", name: NAME, docker: fakeDocker([]), fetch: none, keysRoot }), /no candidate image/);
+  } finally {
+    rmSync(keysRoot, { recursive: true, force: true });
+  }
+});
+
+test("the candidate follows the manifests: a Deployment env the candidate cannot supply is refused, a new literal env is passed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lc-deploy-root-"));
+  try {
+    for (const p of ["compose.yaml", "infra", "deploy"]) cpSync(join(repoRoot, p), join(root, p), { recursive: true });
+    const path = join(root, "deploy", "base", "deployment.yaml");
+    const dep = parse(readFileSync(path, "utf8")) as Obj;
+    const api = (dep["spec"]["template"]["spec"]["containers"] as Obj[]).find((c) => c["name"] === "api")!;
+    api["env"].push({ name: "LOG_LEVEL", value: "debug" });
+    writeFileSync(path, stringify(dep));
+    const calls: string[][] = [];
+    await deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker(calls), fetch: fakeApi("http://127.0.0.1:49153", []), sleep: noSleep, keysRoot: root, root });
+    const apiRun = calls.find((c) => c[0] === "run" && c.includes(`${NAME}-api`))!;
+    assert.ok(apiRun.includes("LOG_LEVEL=debug"), "a literal env of the Deployment reaches the candidate");
+
+    api["env"].push({ name: "MAIL_TOKEN", valueFrom: { secretKeyRef: { name: "mail", key: "token" } } });
+    writeFileSync(path, stringify(dep));
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker([]), fetch: fakeApi("http://127.0.0.1:49153", []), sleep: noSleep, keysRoot: root, root }),
+      /reads MAIL_TOKEN from a source the candidate does not have/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("teardown removes the candidate's containers, volumes and network, tolerating what is already gone", () => {
+  const calls: string[][] = [];
+  removeCandidate({ name: NAME, docker: fakeDocker(calls) });
+  assert.deepEqual(calls, [
+    ["rm", "--force", "--volumes", `${NAME}-api`, `${NAME}-migrate`, `${NAME}-config`, `${NAME}-db`, "#nocheck"],
+    ["volume", "rm", "--force", `${NAME}-keys`, `${NAME}-scopes`, "#nocheck"],
+    ["network", "rm", NAME, "#nocheck"],
+  ]);
+  assert.throws(() => removeCandidate({ name: "loopcloser", docker: fakeDocker([]) }), /not lc-candidate-<id>/);
+});

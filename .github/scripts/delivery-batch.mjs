@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // The batch decision of loop-closer's `batch` delivery guarantee (COND-344,
-// owner INTENTS I67; delivery.yaml). The delivery-batch workflow fires once per
+// owner INTENTS I67; delivery.yaml). The deploy workflow (deploy.yml) fires once per
 // deploy_queue.interval_seconds; this script decides whether that batch holds
-// any change: it reads the last successful delivery-batch run on main (one
+// any change: it reads the last successful deploy run on main (one
 // request, one row, no paging) and writes `run=true` to GITHUB_OUTPUT when main
 // moved since that run's commit (or there is none yet), `run=false` when the
-// batch is empty. The E2E job runs only on `run=true`, so E2E runs once per
+// batch is empty. The deploy job (candidate deploy, E2E, journeys) runs only on `run=true`, so E2E runs once per
 // batch and never twice on the same commit. An unreadable history fails the
 // job naming the cause; it is never read as "nothing changed".
 //
@@ -15,7 +15,7 @@
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-export const BATCH_WORKFLOW = "delivery-batch.yml";
+export const BATCH_WORKFLOW = "deploy.yml";
 const API = "https://api.github.com";
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -50,8 +50,8 @@ async function main() {
   });
   const head = process.env.GITHUB_SHA;
   console.log(d.run
-    ? `batch ${d.since ?? "(first)"}..${head} holds changes: E2E runs`
-    : `batch is empty: main is still ${head}, verified by the last successful batch; E2E skipped`);
+    ? `batch ${d.since ?? "(first)"}..${head} holds changes: the candidate is deployed and verified`
+    : `batch is empty: main is still ${head}, verified by the last successful batch; deploy skipped`);
   const out = process.env.GITHUB_OUTPUT;
   if (out) appendFileSync(out, `run=${d.run}\nsince=${d.since ?? ""}\n`);
 }

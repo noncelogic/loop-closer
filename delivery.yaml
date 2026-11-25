@@ -5,11 +5,13 @@
 # on main and the end-to-end suite runs once per batch, on one fixed interval
 # for the product. The per-pull-request gate (ci.yml `gate`) stays as it is;
 # the E2E batch runs outside it, and a red batch becomes the next fix task.
-# Checked by tests/delivery/batch.test.ts.
+# Each batch's candidate is deployed and verified by the deploy workflow
+# (COND-342, `deploy` below). Checked by tests/delivery/batch.test.ts and
+# tests/delivery/deploy.test.ts.
 delivery_guarantee: batch
 
 deploy_queue:
-  # One fixed interval for the product. The delivery-batch workflow's cron is
+  # One fixed interval for the product. The deploy workflow's cron is
   # derived from it (tests/delivery/batch.test.ts cronFor).
   interval_seconds: 3600
   # The interval is an estimate (estimates-are-measured-and-revisited).
@@ -20,16 +22,31 @@ deploy_queue:
     under the 30-minute job timeout. Hourly keeps a merged change at most an
     hour from end-to-end evidence while running E2E far fewer times than per merge.
   revisit: >-
-    Measured from the delivery-batch runs (gh run list --workflow
-    delivery-batch.yml): revisit when the E2E job's duration exceeds half the
+    Measured from the deploy runs (gh run list --workflow deploy.yml;
+    delivery-batch.yml before COND-342): revisit when the deploy job's duration exceeds half the
     interval, or when batches routinely carry more than five commits or are
     mostly empty.
 
 e2e:
   runs: once_per_batch
-  workflow: .github/workflows/delivery-batch.yml
-  job: e2e
+  workflow: .github/workflows/deploy.yml
+  job: deploy
   # Selects tests/**/*.e2e.ts. `npm test` (*.test.ts), which ci.yml runs on
   # every pull request and main push, selects none of them, so E2E runs only
   # here (tests/delivery/batch.test.ts testSelection).
   command: npm run test:e2e
+
+# The deploy queue's release workflow (COND-342): once per batch the `deploy`
+# job builds the batch head's image (loopcloser:candidate-<sha>, never pushed),
+# deploys it with .github/scripts/deploy-candidate.mjs (its own Postgres, the
+# schema Job's migrate, the API as deploy/base/deployment.yaml runs it), runs
+# the E2E suite above and the journeys against the candidate's API, and always
+# tears it down. Production rollout stays Argo CD from Git (delivery-train.yaml).
+deploy:
+  workflow: .github/workflows/deploy.yml
+  job: deploy
+  journeys:
+    # Selects tests/journeys/**/*.journey.ts, against CANDIDATE_URL with the
+    # candidate's keys in CANDIDATE_KEYS_DIR; no per-merge workflow runs them
+    # (tests/delivery/deploy.test.ts).
+    command: npm run test:journeys
