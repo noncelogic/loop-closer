@@ -1,0 +1,83 @@
+name: delivery-batch
+
+# loop-closer's `batch` delivery guarantee (COND-344; delivery.yaml): the
+# end-to-end suite runs once per batch, on the fixed interval
+# deploy_queue.interval_seconds (3600s, so the cron below is hourly; the two
+# must agree, tests/delivery/batch.test.ts). No push or pull_request trigger:
+# E2E never runs per merge, and the per-pull-request gate stays ci.yml `gate`
+# (Rule: policies/placement-defaults.yaml#gates, slow suites outside the gate).
+# A red batch becomes the next fix task. workflow_dispatch runs a batch on
+# demand.
+#
+# A scheduled run checks out main's head. `batch` reads the last successful
+# run of this workflow and lets `e2e` run only when main moved since then, so
+# an empty batch runs nothing and no commit is verified twice.
+#
+# Every job runs on the self-hosted org scale set (Rule:
+# policies/placement-defaults.yaml#estate). Reads no secret beyond the job's
+# own read-only GITHUB_TOKEN; pushes nothing; touches no cluster.
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Batches are serialised; a batch in progress is never cancelled by the next.
+concurrency:
+  group: delivery-batch
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      since: ${{ steps.decide.outputs.since }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: decide
+        name: Decide whether main moved since the last successful batch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/delivery-batch.mjs
+
+  e2e:
+    needs: batch
+    if: ${{ needs.batch.outputs.run == 'true' }}
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      # The suites that boot the real service and Postgres (Compose replica).
+      - run: npm run test:e2e
+      # The batch's image, built and started as its CronJob would start it.
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: loopcloser:batch-${{ github.sha }}
+      - name: Run the portal-read entrypoint in the batch image
+        run: bash .github/scripts/estate-image-smoke.sh loopcloser:batch-${{ github.sha }} node dist/portal-read.js

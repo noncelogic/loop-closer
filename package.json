@@ -15,6 +15,7 @@
     "start": "node dist/main.js",
     "migrate": "node dist/migrate.js",
     "test": "node --test \"tests/**/*.test.ts\" \"test/**/*.test.ts\" \"deploy/tests/**/*.test.ts\" \"deploy/test/**/*.test.ts\"",
+    "test:e2e": "node --test tests/foundation/local-replica.test.ts tests/foundation/boot-store.test.ts tests/timer/pg-timer-store.test.ts",
     "replica:up": "docker compose up --detach --wait",
     "replica:down": "docker compose down"
   },
