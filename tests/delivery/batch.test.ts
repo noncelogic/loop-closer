@@ -2,10 +2,11 @@
 // policies/placement-defaults.yaml#gates): loop-closer's delivery guarantee is
 // `batch`. delivery.yaml declares deploy_queue.interval_seconds, one fixed
 // interval for the product, and the end-to-end suite runs once per batch: the
-// delivery-batch workflow fires on that interval (its cron is derived from the
+// deploy workflow (the deploy queue) fires on that interval (its cron is derived from the
 // declared seconds), its runs never overlap, and its E2E job runs only when
 // main moved since the last successful batch, never per push or per pull
-// request: the test files each workflow step executes are resolved from
+// request (only a pull request that changes the queue itself runs its dry
+// run, deploy-dry-run.yml; tests/delivery/deploy.test.ts): the test files each workflow step executes are resolved from
 // package.json's scripts and node --test patterns, and no ci.yml or
 // estate-image.yml step selects an E2E file. The interval is an estimate, so the declaration carries its basis
 // and the measurement that revisits it (estimates-are-measured-and-revisited).
@@ -14,12 +15,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { globSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { batchDecision, BATCH_WORKFLOW } from "../../.github/scripts/delivery-batch.mjs";
+import { batchDecision, BATCH_WORKFLOW, runBatch } from "../../.github/scripts/delivery-batch.mjs";
+import { repoRoot, runCommands, testSelection } from "./selection.ts";
 
-const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 type Obj = Record<string, any>;
 
 function yamlFile(...parts: string[]): Obj {
@@ -95,7 +97,7 @@ test("delivery.yaml declares a batch guarantee with a fixed deploy_queue interva
   assert.equal(d["e2e"]["workflow"], `.github/workflows/${BATCH_WORKFLOW}`);
 });
 
-test("the delivery-batch workflow runs E2E once per declared interval", () => {
+test("the deploy queue workflow runs E2E once per declared interval", () => {
   const d = yamlFile("delivery.yaml");
   const wf = yamlFile(d["e2e"]["workflow"]);
   assert.equal(batchGap(wf, d["e2e"]["job"], d["deploy_queue"]["interval_seconds"]), null);
@@ -103,50 +105,6 @@ test("the delivery-batch workflow runs E2E once per declared interval", () => {
   const batch = wf["jobs"]["batch"] as Obj;
   assert.deepEqual(batch["permissions"], { actions: "read", contents: "read" });
 });
-
-/** Split a shell command line into words, honouring single and double quotes (no expansion). */
-function words(line: string): string[] {
-  const out: string[] = [];
-  for (const m of line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) out.push(m[1] ?? m[2] ?? m[3]!);
-  return out;
-}
-
-/**
- * The test files a workflow `run:` command executes: `npm test` and `npm run <script>` resolve through
- * package.json's scripts, and `node --test <patterns>` expands its patterns the way node does (fs.globSync
- * from the repository root). Any other command executes no test file.
- */
-export function testSelection(command: string, scripts: Record<string, string>, seen: string[] = []): string[] {
-  const files = new Set<string>();
-  for (const part of command.split(/\n|&&|\|\||;/)) {
-    const w = words(part.trim());
-    let script: string | undefined;
-    if (w[0] === "npm" && (w[1] === "test" || w[1] === "t")) script = "test";
-    else if (w[0] === "npm" && (w[1] === "run" || w[1] === "run-script") && w[2]) script = w[2];
-    if (script !== undefined) {
-      if (seen.includes(script)) throw new Error(`npm script ${script} runs itself`);
-      const body = scripts[script];
-      if (body === undefined) throw new Error(`no npm script ${script}`);
-      for (const f of testSelection(body, scripts, [...seen, script])) files.add(f);
-      continue;
-    }
-    if (w[0] === "node" && w.includes("--test")) {
-      for (const arg of w.slice(1).filter((a) => !a.startsWith("-"))) {
-        for (const f of globSync(arg, { cwd: repoRoot })) files.add(f.split("\\").join("/"));
-      }
-    }
-  }
-  return [...files].sort();
-}
-
-/** Every `run:` command of a workflow's jobs, keyed by job. */
-function runCommands(wf: Obj): Array<{ job: string; run: string }> {
-  const out: Array<{ job: string; run: string }> = [];
-  for (const [job, spec] of Object.entries((wf["jobs"] ?? {}) as Obj)) {
-    for (const step of ((spec as Obj)["steps"] ?? []) as Obj[]) if (typeof step["run"] === "string") out.push({ job, run: step["run"] });
-  }
-  return out;
-}
 
 const scripts = (JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as Obj)["scripts"] as Record<string, string>;
 
@@ -197,7 +155,9 @@ test("the batch E2E selection executes every E2E file exactly once", () => {
   assert.equal(perMergeWorkflow(batchWf), false, `${d["e2e"]["workflow"]} runs per merge`);
   const byJob = new Map<string, string[]>();
   for (const { job, run } of runCommands(batchWf)) byJob.set(job, [...(byJob.get(job) ?? []), ...testSelection(run, scripts)]);
-  assert.deepEqual([...(byJob.get(d["e2e"]["job"]) ?? [])].sort(), repoE2eFiles, `${d["e2e"]["job"]} runs each E2E file exactly once`);
+  // Its journeys against the deployed candidate are checked by tests/delivery/deploy.test.ts.
+  const e2eRun = (byJob.get(d["e2e"]["job"]) ?? []).filter((f) => f.endsWith(".e2e.ts"));
+  assert.deepEqual(e2eRun.sort(), repoE2eFiles, `${d["e2e"]["job"]} runs each E2E file exactly once`);
   for (const [job, files] of byJob) if (job !== d["e2e"]["job"]) assert.deepEqual(files, [], `${job} runs no test`);
 
   // No other workflow has the E2E job.
@@ -208,8 +168,9 @@ test("the batch E2E selection executes every E2E file exactly once", () => {
 
 test("test selection resolves npm scripts and node --test patterns", () => {
   const s = { test: 'node --test "tests/delivery/*.test.ts"', all: "npm test && npm run e2e", e2e: "node --test nope/*.e2e.ts", loop: "npm run loop" };
-  assert.deepEqual(testSelection("npm test", s), ["tests/delivery/batch.test.ts"]);
-  assert.deepEqual(testSelection("npm run all", s), ["tests/delivery/batch.test.ts"]);
+  const delivery = ["tests/delivery/batch.test.ts", "tests/delivery/deploy.test.ts"];
+  assert.deepEqual(testSelection("npm test", s), delivery);
+  assert.deepEqual(testSelection("npm run all", s), delivery);
   assert.deepEqual(testSelection("node --test tests/delivery/batch.test.ts", s), ["tests/delivery/batch.test.ts"]);
   assert.deepEqual(testSelection("npm ci --ignore-scripts\nnpm run lint", { ...s, lint: "echo lint" }), []);
   assert.throws(() => testSelection("npm run loop", s), /runs itself/);
@@ -241,7 +202,7 @@ test("a declaration or workflow that does not batch is caught", () => {
 
   const wf = {
     on: { schedule: [{ cron: "0 * * * *" }], workflow_dispatch: {} },
-    concurrency: { group: "delivery-batch", "cancel-in-progress": false },
+    concurrency: { group: "deploy", "cancel-in-progress": false },
     jobs: { batch: {}, e2e: { needs: "batch", if: "needs.batch.outputs.run == 'true'" } },
   };
   assert.equal(batchGap(wf, "e2e", 3600), null);
@@ -294,4 +255,64 @@ test("an unreadable batch history fails loudly instead of guessing", async () =>
   const malformed = github({ status: 200, body: { workflow_runs: "nope" } }, []);
   await assert.rejects(batchDecision({ repo: REPO, headSha: "bbb", token: "t0ken", fetch: malformed }), /workflow_runs/);
   await assert.rejects(batchDecision({ repo: REPO, headSha: "", token: "t0ken", fetch: malformed }), /head sha/);
+});
+
+/** A fake GitHub for a run of the batch step that must read no live history: it fails every request. */
+function noGithub(seen: string[]) {
+  return async (url: string | URL): Promise<Response> => {
+    seen.push(String(url));
+    throw new Error(`unexpected live history read ${String(url)}`);
+  };
+}
+
+/** Runs the batch step (runBatch, as `node delivery-batch.mjs` does) with `env`; returns its GITHUB_OUTPUT. */
+async function batchStep(env: Record<string, string>, fetch: (url: string, init?: RequestInit) => Promise<Response>): Promise<Record<string, string>> {
+  const dir = mkdtempSync(join(tmpdir(), "lc-batch-test-"));
+  try {
+    const output = join(dir, "output");
+    writeFileSync(output, "");
+    await runBatch({
+      env: { GITHUB_REPOSITORY: REPO, GITHUB_SHA: "bbb", GITHUB_TOKEN: "t0ken", GITHUB_OUTPUT: output, ...env },
+      fetch,
+      log: () => {},
+    });
+    const out: Record<string, string> = {};
+    for (const line of readFileSync(output, "utf8").split("\n").filter(Boolean)) {
+      const [k, ...v] = line.split("=");
+      out[k!] = v.join("=");
+    }
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the dry run's batch job decides a first batch without reading the queue's history, so its deploy job runs", async () => {
+  // deploy.yml is new on the pull request, so GitHub has no history for it (HTTP 404): the dry run's batch
+  // step answers the history read with a first batch instead, through the real decision and GITHUB_OUTPUT.
+  const d = yamlFile("delivery.yaml");
+  const dry = yamlFile(d["deploy"]["dry_run"]["workflow"]);
+  const batch = dry["jobs"]["batch"] as Obj;
+  const step = (batch["steps"] as Obj[]).find((s) => s["id"] === "decide")!;
+  assert.equal(step["run"].trim(), "node .github/scripts/delivery-batch.mjs");
+  const seen: string[] = [];
+  const out = await batchStep({ ...(batch["env"] as Record<string, string>) }, noGithub(seen));
+  assert.deepEqual(seen, [], "the dry run read the live batch history");
+  assert.deepEqual(out, { run: "true", since: "" });
+  // The dry run's deploy job runs on that output.
+  assert.equal(batch["outputs"]["run"], "${{ steps.decide.outputs.run }}");
+  assert.match(String(dry["jobs"][d["deploy"]["job"]]["if"]), /needs\.batch\.outputs\.run\s*==\s*'true'/);
+});
+
+test("the queue's batch job reads the live history and fails on an unreadable one", async () => {
+  const d = yamlFile("delivery.yaml");
+  const env = { ...((yamlFile(d["deploy"]["workflow"])["jobs"]["batch"] as Obj)["env"] ?? {}) } as Record<string, string>;
+  assert.equal(env["DRY_RUN_OF"], undefined, "the queue's batch job is a dry run");
+  const seen: string[] = [];
+  const live = github({ status: 200, body: { total_count: 1, workflow_runs: [{ id: 7, head_sha: "aaa" }] } }, seen);
+  assert.deepEqual(await batchStep(env, live), { run: "true", since: "aaa" });
+  assert.deepEqual(seen, [RUNS_URL]);
+  await assert.rejects(batchStep(env, github({ status: 404, body: { message: "Not Found" } }, [])), /HTTP 404/);
+  // A step that names another job as the one it dry-runs is refused, never read as the queue's batch.
+  await assert.rejects(batchStep({ DRY_RUN_OF: "deploy" }, noGithub([])), /DRY_RUN_OF/);
 });

@@ -16,6 +16,7 @@
     "migrate": "node dist/migrate.js",
     "test": "node --test \"tests/**/*.test.ts\" \"test/**/*.test.ts\" \"deploy/tests/**/*.test.ts\" \"deploy/test/**/*.test.ts\"",
     "test:e2e": "node --test \"tests/**/*.e2e.ts\"",
+    "test:journeys": "node --test \"tests/journeys/**/*.journey.ts\"",
     "replica:up": "docker compose up --detach --wait",
     "replica:down": "docker compose down"
   },
