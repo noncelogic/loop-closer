@@ -14,8 +14,8 @@
 // Job declare it. Nothing here reaches docker, GitHub or a cluster.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, matchesGlob } from "node:path";
 import { parse, stringify } from "yaml";
@@ -351,4 +351,53 @@ test("teardown removes the candidate's containers, volumes and network, tolerati
     ["network", "rm", NAME, "#nocheck"],
   ]);
   assert.throws(() => removeCandidate({ name: "loopcloser", docker: fakeDocker([]) }), /not lc-candidate-<id>/);
+});
+
+/**
+ * A fake docker executable that answers only the calls a candidate deploy makes, logs each call's arguments
+ * to $FAKE_DOCKER_LOG, and fails `$FAKE_DOCKER_FAIL` (create or run) the way docker does: Docker's stderr
+ * echoes the arguments, so it carries the password and the DATABASE_URL. Any other call fails as unexpected.
+ */
+const FAKE_DOCKER_BIN = `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "$1" = "$FAKE_DOCKER_FAIL" ]; then
+  echo "Error response from daemon: cannot $1 with $*" >&2
+  exit 125
+fi
+case "$1" in
+  network|volume|create|cp|start|rm|run) exit 0 ;;
+  exec) echo "127.0.0.1:5432 - accepting connections"; exit 0 ;;
+esac
+echo "unexpected docker call: $*" >&2
+exit 99
+`;
+
+test("a failed docker command reports the subcommand without the generated database password or DATABASE_URL credentials", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lc-deploy-redact-"));
+  try {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), FAKE_DOCKER_BIN, { mode: 0o755 });
+    for (const sub of ["create", "run"]) {
+      const log = join(dir, `${sub}.log`);
+      const res = spawnSync(process.execPath, [join(repoRoot, ".github", "scripts", "deploy-candidate.mjs"), "up", IMAGE, NAME], {
+        encoding: "utf8",
+        env: { PATH: `${bin}:${process.env["PATH"]}`, RUNNER_TEMP: dir, FAKE_DOCKER_LOG: log, FAKE_DOCKER_FAIL: sub },
+      });
+      const printed = `${res.stdout}${res.stderr}`;
+      assert.equal(res.status, 1, printed);
+      const calls = readFileSync(log, "utf8");
+      const password = /POSTGRES_PASSWORD=(\S+)/.exec(calls)?.[1];
+      assert.ok(password && password.length >= 32, `docker create was not given a generated password: ${calls}`);
+      // The failure reached docker with the secret, as Docker's stderr echoes it.
+      assert.ok(calls.split("\n").some((c) => c.startsWith(`${sub} `) && c.includes(password)));
+      assert.match(printed, new RegExp(`^::error::docker ${sub} `, "m"), `the failed docker ${sub} is not named`);
+      assert.ok(!printed.includes(password), `docker ${sub}'s failure printed the generated password:\n${printed}`);
+      assert.doesNotMatch(printed, /postgres:\/\/[^\s:@/]+:[^\s@/*]+@/, `docker ${sub}'s failure printed DATABASE_URL credentials`);
+      assert.doesNotMatch(printed, /POSTGRES_PASSWORD=(?!\*)/, `docker ${sub}'s failure printed POSTGRES_PASSWORD`);
+      if (sub === "run") assert.match(printed, /DATABASE_URL=postgres:\/\/loopcloser:\*\*\*@/, "the masked DATABASE_URL still names its user");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

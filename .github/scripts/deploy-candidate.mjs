@@ -47,13 +47,27 @@ export const CANDIDATE_INPUTS = Object.freeze({
   initdb: "infra/postgres/initdb",
 });
 
-/** Runs docker; returns stdout, throws on a non-zero exit unless `check` is false. */
+const MASK = "***";
+
+/**
+ * Masks credentials in text the deployer raises or prints: each given secret (the generated password and the
+ * DATABASE_URL), the password of any URL's userinfo (postgres://user:***@host) and any *PASSWORD= env value.
+ */
+function redact(text, secrets = []) {
+  let out = String(text);
+  for (const s of secrets) if (s) out = out.split(s).join(MASK);
+  return out
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)[^\s@/]+@/gi, `$1${MASK}@`)
+    .replace(/(PASSWORD=)(?!\*\*\*(?:\s|$))\S+/gi, `$1${MASK}`);
+}
+
+/** Runs docker; returns stdout, throws on a non-zero exit unless `check` is false, with its credentials masked. */
 function realDocker(args, { check = true } = {}) {
   try {
     return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
     if (!check) return "";
-    throw new Error(`docker ${args.join(" ")} failed: ${String(err.stderr ?? err.message).trim()}`);
+    throw new Error(redact(`docker ${args.join(" ")} failed: ${String(err.stderr ?? err.message).trim()}`));
   }
 }
 
@@ -154,6 +168,15 @@ export async function deployCandidate({
   const db = `${name}-db`;
   const password = random();
   const databaseUrl = `postgres://${shape.db.user}:${password}@${db}:5432/${shape.db.database}`;
+  try {
+    return await deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, databaseUrl });
+  } catch (err) {
+    // Whatever docker or a log echoed, the candidate's database credentials never leave in an error.
+    throw new Error(redact(err?.message ?? err, [password, databaseUrl]));
+  }
+}
+
+async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, databaseUrl }) {
 
   // Fresh keys, one per principal, readable by the API's user once copied in.
   const keysDir = mkdtempSync(join(keysRoot, "lc-candidate-keys-"));
@@ -251,7 +274,7 @@ async function main([cmd, ...args]) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((err) => {
-    console.log(`::error::${err.message}`);
+    console.log(`::error::${redact(err?.message ?? err)}`);
     process.exitCode = 1;
   });
 }
