@@ -7,8 +7,9 @@
 // no Kubernetes tools, no Postgres), and its job timeout is the declared
 // budget. The unit selection (resolved from package.json the way npm and node
 // do) is non-empty, holds no E2E file or journey, and is run here for real
-// with node alone on PATH (no docker, kubectl or git) and must pass within the
-// declared budget. Nothing here reaches GitHub or a runner.
+// with node alone on PATH (no docker, kubectl or git) and must exit 0. The
+// job's timeout-minutes enforces the budget on the runner; here the declared
+// budget only guards against a hang. Nothing here reaches GitHub or a runner.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -65,6 +66,16 @@ export function unitJobGap(wf: Obj, job: string, command: string, minutes: numbe
   return null;
 }
 
+/**
+ * Why a run of the unit selection fails the check, or null when it exited 0. Judged by exit status alone: elapsed
+ * wall-clock time depends on the runner's load and clock, so the runtime budget is the CI job's timeout-minutes
+ * (unitJobGap), and the spawn's timeout here is only a hang guard.
+ */
+export function unitRunGap(r: { status: number | null; stdout: string; stderr: string }): string | null {
+  if (r.status !== 0) return `the unit selection failed with node alone on PATH (exit ${r.status}):\n${r.stdout}\n${r.stderr}`;
+  return null;
+}
+
 test("delivery.yaml declares the required fast unit check", () => {
   assert.equal(unitDeclarationGap(yamlFile("delivery.yaml")), null);
 });
@@ -89,23 +100,21 @@ test("the unit selection is non-empty, inside the per-pull-request suite, and ho
   assert.deepEqual(selected.sort(), unit);
 });
 
-test("the unit selection passes with node alone on PATH within the declared budget", () => {
+test("the unit selection passes with node alone on PATH", () => {
   const u = yamlFile("delivery.yaml")["merge"]["unit"] as Obj;
   const unit = testSelection(u["command"], scripts);
   const bin = mkdtempSync(join(tmpdir(), "lc-unit-path-"));
   try {
     // Only node is reachable: a unit file that starts docker, kubectl, git or a Postgres client fails here.
     symlinkSync(process.execPath, join(bin, "node"));
-    const started = Date.now();
+    // The timeout is a hang guard only; the CI job's timeout-minutes enforces the budget.
     const r = spawnSync(join(bin, "node"), ["--test", ...unit], {
       cwd: repoRoot,
       env: { PATH: bin, HOME: bin, TMPDIR: tmpdir() },
       encoding: "utf8",
       timeout: u["timeout_minutes"] * 60_000,
     });
-    const seconds = (Date.now() - started) / 1000;
-    assert.equal(r.status, 0, `the unit selection failed with node alone on PATH:\n${r.stdout}\n${r.stderr}`);
-    assert.ok(seconds < 60, `the unit selection took ${seconds}s, not a fast check`);
+    assert.equal(unitRunGap(r), null);
   } finally {
     rmSync(bin, { recursive: true, force: true });
   }
@@ -131,4 +140,10 @@ test("a unit check that is missing, guarded, unrequired, slow or doing more is c
   assert.match(gap({ ...wf, jobs: { ...wf.jobs, unit: { ...wf.jobs.unit, steps: [...steps, { uses: "docker/setup-buildx-action@v3" }] } } })!, /buildx/);
   assert.match(gap({ ...wf, jobs: { ...wf.jobs, unit: { ...wf.jobs.unit, steps: [...steps, { run: "npm test" }] } } })!, /also runs npm test/);
   assert.match(gap({ ...wf, jobs: { ...wf.jobs, unit: { ...wf.jobs.unit, steps: steps.slice(0, 3) } } })!, /does not run/);
+
+  // A run is judged by its exit status alone: a passing selection slowed by a busy runner still passes; the job's
+  // timeout-minutes (checked above) enforces the budget.
+  assert.equal(unitRunGap({ status: 0, stdout: "", stderr: "" }), null);
+  assert.match(unitRunGap({ status: 1, stdout: "not ok 1", stderr: "" })!, /exit 1[\s\S]*not ok 1/);
+  assert.match(unitRunGap({ status: null, stdout: "", stderr: "" })!, /exit null/);
 });
