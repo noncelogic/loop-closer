@@ -98,6 +98,7 @@ test("the journeys are their own selection, run only by the deploy job", () => {
 const NAME = "lc-candidate-42-1";
 const IMAGE = "loopcloser:candidate-abc";
 const PW = "pw0";
+const SUPER_PW = "superpw1";
 const DB_URL = `postgres://loopcloser:${PW}@${NAME}-db:5432/loopcloser`;
 
 /**
@@ -113,6 +114,7 @@ function fakeDocker(calls: string[][], opts: { pgReadyAfter?: number; port?: str
       if (probes++ < (opts.pgReadyAfter ?? 0)) throw new Error("no response");
       return "127.0.0.1:5432 - accepting connections\n";
     }
+    if (cmd === "exec" && args[2] === "psql" && args.includes("ON_ERROR_STOP=1")) return "";
     if (cmd === "port") return `${opts.port ?? "127.0.0.1:49153"}\n`;
     if (cmd === "logs") return "api log line\n";
     if (cmd === "network" && (sub === "create" || sub === "rm")) return "";
@@ -147,7 +149,7 @@ test("a candidate is deployed as the estate runs it: Postgres, the schema Job's 
       docker: fakeDocker(calls, { pgReadyAfter: 2 }),
       fetch: fakeApi("http://127.0.0.1:49153", seen, 1),
       sleep: noSleep,
-      random: () => (n++ === 0 ? PW : `key${n}`),
+      random: () => [PW, SUPER_PW][n++] ?? `key${n}`,
       keysRoot,
     });
     assert.equal(out.url, "http://127.0.0.1:49153");
@@ -155,19 +157,26 @@ test("a candidate is deployed as the estate runs it: Postgres, the schema Job's 
     // Each principal gets its own fresh key, in a new directory under keysRoot.
     assert.equal(basename(join(out.keysDir, "..")), basename(keysRoot));
     assert.deepEqual(readdirSync(out.keysDir).sort(), ["hermes", "joe"]);
-    assert.equal(readFileSync(join(out.keysDir, "joe"), "utf8"), "key2\n");
-    assert.equal(readFileSync(join(out.keysDir, "hermes"), "utf8"), "key3\n");
+    assert.equal(readFileSync(join(out.keysDir, "joe"), "utf8"), "key3\n");
+    assert.equal(readFileSync(join(out.keysDir, "hermes"), "utf8"), "key4\n");
     assert.deepEqual(seen, ["http://127.0.0.1:49153/healthz", "http://127.0.0.1:49153/healthz"]);
 
-    const probe = ["exec", `${NAME}-db`, "pg_isready", "-h", "127.0.0.1", "-U", "loopcloser", "-d", "loopcloser"];
+    // The bootstrap superuser only probes and bootstraps, over the socket; database.yaml's initdb owner role,
+    // not a superuser, owns the database, and the migrations and the API connect as it.
+    const probe = ["exec", `${NAME}-db`, "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"];
+    const psql = (db: string) => ["exec", `${NAME}-db`, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", db];
     const hardened = ["--user", "1000:1000", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"];
     assert.deepEqual(calls, [
       ["network", "create", NAME],
       ["create", "--name", `${NAME}-db`, "--network", NAME,
-        "--env", "POSTGRES_USER=loopcloser", "--env", `POSTGRES_PASSWORD=${PW}`, "--env", "POSTGRES_DB=loopcloser", "pgvector/pgvector:pg17"],
-      ["cp", `${join(repoRoot, "infra", "postgres", "initdb")}/.`, `${NAME}-db:/docker-entrypoint-initdb.d/`],
+        "--env", "POSTGRES_USER=postgres", "--env", `POSTGRES_PASSWORD=${SUPER_PW}`, "--env", "POSTGRES_DB=postgres", "pgvector/pgvector:pg17"],
       ["start", `${NAME}-db`],
       probe, probe, probe,
+      [...psql("postgres"),
+        "-c", `CREATE ROLE "loopcloser" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${PW}'`,
+        "-c", `CREATE DATABASE "loopcloser" OWNER "loopcloser"`,
+        "-c", "CREATE ROLE loopcloser_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;"],
+      [...psql("loopcloser"), "-c", "CREATE EXTENSION IF NOT EXISTS vector;"],
       ["volume", "create", `${NAME}-keys`],
       ["volume", "create", `${NAME}-scopes`],
       ["create", "--name", `${NAME}-config`, "--volume", `${NAME}-keys:/keys`, "--volume", `${NAME}-scopes:/scopes`, IMAGE],
@@ -387,8 +396,9 @@ test("a failed docker command reports the subcommand without the generated datab
       const printed = `${res.stdout}${res.stderr}`;
       assert.equal(res.status, 1, printed);
       const calls = readFileSync(log, "utf8");
-      const password = /POSTGRES_PASSWORD=(\S+)/.exec(calls)?.[1];
-      assert.ok(password && password.length >= 32, `docker create was not given a generated password: ${calls}`);
+      // create carries the superuser's generated password, run the owner's (in DATABASE_URL).
+      const password = (sub === "create" ? /POSTGRES_PASSWORD=(\S+)/ : /postgres:\/\/loopcloser:([^@\s]+)@/).exec(calls)?.[1];
+      assert.ok(password && password.length >= 32, `docker ${sub} was not given a generated password: ${calls}`);
       // The failure reached docker with the secret, as Docker's stderr echoes it.
       assert.ok(calls.split("\n").some((c) => c.startsWith(`${sub} `) && c.includes(password)));
       assert.match(printed, new RegExp(`^::error::docker ${sub} `, "m"), `the failed docker ${sub} is not named`);

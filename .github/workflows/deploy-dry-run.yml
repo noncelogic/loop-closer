@@ -42,7 +42,7 @@ on:
       - deploy/base/deployment.yaml
       - deploy/overlays/aks-obs-01/schema-job.yaml
       - deploy/base/api-scopes/**
-      - infra/postgres/initdb/**
+      - deploy/base/database.yaml
 
 permissions:
   contents: read

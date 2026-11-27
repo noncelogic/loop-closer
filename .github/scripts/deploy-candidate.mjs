@@ -5,11 +5,16 @@
 // the journeys against it, then tears it down.
 //
 // The candidate runs the way the estate runs it, read from the manifests rather
-// than restated: the schema Job's migrate command
-// (deploy/overlays/aks-obs-01/schema-job.yaml) applies the migrations to the
-// candidate's own Postgres (compose.yaml's image, user and database, plus
-// infra/postgres/initdb), then the API Deployment's container
-// (deploy/base/deployment.yaml) serves with its command, port, literal env, user,
+// than restated. Its own Postgres (compose.yaml's image) is bootstrapped as
+// deploy/base/database.yaml bootstraps the estate's (LC-DEPLOY-CANDIDATE-DB-ROLE):
+// as the `postgres` bootstrap superuser, which only that bootstrap uses, it
+// creates the initdb owner role (LOGIN, not a superuser, no CREATEDB or
+// CREATEROLE, as CloudNativePG creates it) and the database it owns, then runs
+// postInitSQL and postInitApplicationSQL. The schema Job's migrate command
+// (deploy/overlays/aks-obs-01/schema-job.yaml) then applies the migrations as
+// that owner role, so a migration needing superuser fails here as on the
+// estate, and the API Deployment's container
+// (deploy/base/deployment.yaml) serves, as the same owner role, with its command, port, literal env, user,
 // read-only root, dropped capabilities and no privilege escalation, with the API
 // keys and scopes mounted read-only where the Deployment mounts them. The keys
 // are fresh random ones, one per principal (joe, and each scope file under
@@ -34,6 +39,8 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", 
 const NAME = /^lc-candidate-[a-z0-9][a-z0-9_.-]*$/;
 const OWNER = "joe";
 const HEALTH_TIMEOUT_MS = 5_000;
+/** The Postgres image's bootstrap superuser, as CloudNativePG's; only the bootstrap connects as it, over the socket. */
+const SUPERUSER = "postgres";
 
 /**
  * Every repository file and directory candidateShape reads to run the candidate. A pull request changing
@@ -44,10 +51,14 @@ export const CANDIDATE_INPUTS = Object.freeze({
   deployment: "deploy/base/deployment.yaml",
   schemaJob: "deploy/overlays/aks-obs-01/schema-job.yaml",
   scopes: "deploy/base/api-scopes",
-  initdb: "infra/postgres/initdb",
+  database: "deploy/base/database.yaml",
 });
 
 const MASK = "***";
+
+/** A quoted SQL identifier and string literal, for the role, database and password the bootstrap names. */
+const ident = (s) => `"${String(s).replace(/"/g, '""')}"`;
+const literal = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /**
  * Masks credentials in text the deployer raises or prints: each given secret (the generated password and the
@@ -111,6 +122,14 @@ export function candidateShape(root = REPO_ROOT) {
   const compose = yamlAt(root, CANDIDATE_INPUTS.compose).services.postgres;
   const deployment = yamlAt(root, CANDIDATE_INPUTS.deployment);
   const job = yamlAt(root, CANDIDATE_INPUTS.schemaJob);
+  const initdb = yamlAt(root, CANDIDATE_INPUTS.database)?.spec?.bootstrap?.initdb ?? {};
+  for (const k of ["database", "owner"]) if (typeof initdb[k] !== "string" || !initdb[k]) throw new Error(`database.yaml names no initdb ${k}`);
+  if (initdb.owner === SUPERUSER) throw new Error(`database.yaml's initdb owner is the ${SUPERUSER} superuser`);
+  const sqlList = (k) => {
+    const v = initdb[k] ?? [];
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new Error(`database.yaml initdb ${k} is not a list of statements`);
+    return v;
+  };
 
   const apiPod = deployment.spec.template.spec;
   const api = containerOf(apiPod, "api", "deployment.yaml");
@@ -127,9 +146,11 @@ export function candidateShape(root = REPO_ROOT) {
   return {
     db: {
       image: compose.image,
-      user: compose.environment.POSTGRES_USER,
-      database: compose.environment.POSTGRES_DB,
-      initdb: join(root, CANDIDATE_INPUTS.initdb),
+      superuser: SUPERUSER,
+      owner: initdb.owner,
+      database: initdb.database,
+      postInitSQL: sqlList("postInitSQL"),
+      postInitApplicationSQL: sqlList("postInitApplicationSQL"),
     },
     migrate: runOptions(jobPod, migrate),
     api: { ...runOptions(apiPod, api), env: literalEnv(api), port, keysPath: mounts["api-keys"], scopesPath: mounts["api-scopes"] },
@@ -166,17 +187,25 @@ export async function deployCandidate({
   if (!NAME.test(String(name ?? ""))) throw new Error(`candidate name ${JSON.stringify(name)} is not lc-candidate-<id>`);
   const shape = candidateShape(root);
   const db = `${name}-db`;
+  // The owner's password reaches the migrations and the API; the superuser's reaches only the Postgres container.
   const password = random();
-  const databaseUrl = `postgres://${shape.db.user}:${password}@${db}:5432/${shape.db.database}`;
+  const superPassword = random();
+  const databaseUrl = `postgres://${shape.db.owner}:${password}@${db}:5432/${shape.db.database}`;
   try {
-    return await deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, databaseUrl });
+    return await deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl });
   } catch (err) {
     // Whatever docker or a log echoed, the candidate's database credentials never leave in an error.
-    throw new Error(redact(err?.message ?? err, [password, databaseUrl]));
+    throw new Error(redact(err?.message ?? err, [password, superPassword, databaseUrl]));
   }
 }
 
-async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, databaseUrl }) {
+/** psql as the bootstrap superuser over the container's socket, one statement per -c, stopping at the first error. */
+function psqlAsSuperuser(docker, db, shape, database, statements) {
+  if (statements.length === 0) return;
+  docker(["exec", db, "psql", "-v", "ON_ERROR_STOP=1", "-U", shape.db.superuser, "-d", database, ...statements.flatMap((s) => ["-c", s])]);
+}
+
+async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl }) {
 
   // Fresh keys, one per principal, readable by the API's user once copied in.
   const keysDir = mkdtempSync(join(keysRoot, "lc-candidate-keys-"));
@@ -185,19 +214,26 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
 
   docker(["network", "create", name]);
   docker(["create", "--name", db, "--network", name,
-    "--env", `POSTGRES_USER=${shape.db.user}`, "--env", `POSTGRES_PASSWORD=${password}`, "--env", `POSTGRES_DB=${shape.db.database}`,
+    "--env", `POSTGRES_USER=${shape.db.superuser}`, "--env", `POSTGRES_PASSWORD=${superPassword}`, "--env", `POSTGRES_DB=${shape.db.superuser}`,
     shape.db.image]);
-  docker(["cp", `${shape.db.initdb}/.`, `${db}:/docker-entrypoint-initdb.d/`]);
   docker(["start", db]);
   // -h 127.0.0.1: the initdb-phase server listens only on its socket (compose.yaml healthcheck).
   await until(attempts, intervalMs, sleep, `Postgres of ${name} is not ready`, async () => {
     try {
-      docker(["exec", db, "pg_isready", "-h", "127.0.0.1", "-U", shape.db.user, "-d", shape.db.database]);
+      docker(["exec", db, "pg_isready", "-h", "127.0.0.1", "-U", shape.db.superuser, "-d", shape.db.superuser]);
       return true;
     } catch {
       return false;
     }
   });
+  // database.yaml's initdb: the owner role and its database, then postInitSQL (in postgres) and
+  // postInitApplicationSQL (in the application database), each run once by the superuser.
+  psqlAsSuperuser(docker, db, shape, shape.db.superuser, [
+    `CREATE ROLE ${ident(shape.db.owner)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${literal(password)}`,
+    `CREATE DATABASE ${ident(shape.db.database)} OWNER ${ident(shape.db.owner)}`,
+    ...shape.db.postInitSQL,
+  ]);
+  psqlAsSuperuser(docker, db, shape, shape.db.database, shape.db.postInitApplicationSQL);
 
   // The keys and scopes, in volumes the API mounts read-only (a read-only root cannot be copied into).
   docker(["volume", "create", `${name}-keys`]);
