@@ -168,7 +168,7 @@ test("the batch E2E selection executes every E2E file exactly once", () => {
 
 test("test selection resolves npm scripts and node --test patterns", () => {
   const s = { test: 'node --test "tests/delivery/*.test.ts"', all: "npm test && npm run e2e", e2e: "node --test nope/*.e2e.ts", loop: "npm run loop" };
-  const delivery = ["tests/delivery/batch.test.ts", "tests/delivery/deploy.test.ts"];
+  const delivery = ["tests/delivery/batch.test.ts", "tests/delivery/deploy.test.ts", "tests/delivery/merge-unit.test.ts"];
   assert.deepEqual(testSelection("npm test", s), delivery);
   assert.deepEqual(testSelection("npm run all", s), delivery);
   assert.deepEqual(testSelection("node --test tests/delivery/batch.test.ts", s), ["tests/delivery/batch.test.ts"]);
