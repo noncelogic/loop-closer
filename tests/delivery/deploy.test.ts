@@ -326,6 +326,22 @@ test("a pull request that changes the deploy queue runs its batch and deploy job
   assert.deepEqual(calls.at(-1), ["network", "rm", "lc-candidate-pr-89-123-2", "#nocheck"]);
 });
 
+test("the dry run's trigger covers every file the candidate is built or migrated from, including db/migrations and package-lock.json", () => {
+  const paths = yamlFile(delivery["deploy"]["dry_run"]["workflow"])["on"]["pull_request"]["paths"] as string[];
+  const uncovered = (trigger: string[]): string[] => queueFiles().filter((f) => !trigger.some((p) => matchesGlob(f, p)));
+  const files = queueFiles();
+  // The pinned inputs include the lockfile `npm ci` installs and every migration the candidate applies at startup,
+  // alongside every file deploy-candidate.mjs reads (CANDIDATE_INPUTS).
+  assert.ok(files.includes("package-lock.json"), "the pinned candidate inputs omit package-lock.json");
+  assert.ok(files.some((f) => f.startsWith("db/migrations/")), "the pinned candidate inputs omit db/migrations");
+  for (const input of Object.values(CANDIDATE_INPUTS)) assert.ok(files.some((f) => f === input || f.startsWith(`${input}/`)), `${input} is not pinned`);
+  assert.deepEqual(uncovered(paths), [], "a pull request changing these does not run the dry run");
+  // A trigger without either path leaves a candidate input that skips the dry run, so the guard fails.
+  const without = (gone: (p: string) => boolean): string[] => paths.filter((p) => !gone(p));
+  assert.ok(uncovered(without((p) => p.startsWith("db/migrations"))).some((f) => f.startsWith("db/migrations/")));
+  assert.deepEqual(uncovered(without((p) => p === "package-lock.json")), ["package-lock.json"]);
+});
+
 test("teardown removes the candidate's containers, volumes and network, tolerating what is already gone", () => {
   const calls: string[][] = [];
   removeCandidate({ name: NAME, docker: fakeDocker(calls) });
