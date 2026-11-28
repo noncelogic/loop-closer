@@ -10,6 +10,21 @@
 # tests/delivery/deploy.test.ts.
 delivery_guarantee: batch
 
+# The per-pull-request fast unit check (COND-343; owner INTENTS I67,
+# DELIVERY-GUARANTEE-CHECK; Rule: policies/placement-defaults.yaml#gates). The
+# ci.yml `unit` job runs it on every pull request, and the required status
+# check `gate` needs it, so no merge lands without a passing unit run. It runs
+# only the self-contained unit selection (no image, Kubernetes tools or
+# Postgres) inside a 5-minute job timeout. Checked by
+# tests/delivery/merge-unit.test.ts.
+merge:
+  unit:
+    workflow: .github/workflows/ci.yml
+    job: unit
+    command: npm run test:unit
+    required: true
+    timeout_minutes: 5
+
 deploy_queue:
   # One fixed interval for the product. The deploy workflow's cron is
   # derived from it (tests/delivery/batch.test.ts cronFor).

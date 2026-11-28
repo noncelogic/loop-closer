@@ -45,6 +45,26 @@ jobs:
       # delivery.yaml; Rule: policies/placement-defaults.yaml#gates).
       - run: npm test
 
+  # The fast unit check (COND-343; owner INTENTS I67, DELIVERY-GUARANTEE-CHECK;
+  # Rule: policies/placement-defaults.yaml#gates), declared as merge.unit in
+  # delivery.yaml. Runs only the self-contained unit selection (npm run
+  # test:unit: no image build, no Kubernetes tools, no Postgres), so a
+  # pull request gets a unit verdict within minutes. `gate` needs it, so it
+  # is required. Checked by tests/delivery/merge-unit.test.ts.
+  unit:
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:unit
+
   # Renders every kustomize overlay and validates it with kubectl client-side
   # dry-run plus kubeconform schema validation against pinned Kubernetes and
   # CRD schemas checked in under tests/deploy/schemas/, read as local files only
@@ -175,7 +195,7 @@ jobs:
   # The decision is .github/scripts/ci-gate.sh, given every needed job's result.
   gate:
     if: ${{ always() }}
-    needs: [test, manifests, image, estate-image-dry-run, estate-image-inputs]
+    needs: [unit, test, manifests, image, estate-image-dry-run, estate-image-inputs]
     runs-on: [self-hosted, aks]
     timeout-minutes: 5
     permissions:

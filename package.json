@@ -15,6 +15,7 @@
     "start": "node dist/main.js",
     "migrate": "node dist/migrate.js",
     "test": "node --test \"tests/**/*.test.ts\" \"test/**/*.test.ts\" \"deploy/tests/**/*.test.ts\" \"deploy/test/**/*.test.ts\"",
+    "test:unit": "node --test \"tests/api/*.test.ts\" \"tests/contracts/*.test.ts\" \"tests/kernel/{async-store,communications,intake,loop-type-authority,when-anchor}.test.ts\" \"tests/sensors/{framework,sources}.test.ts\" \"tests/timer/{recurrence-dst,tick}.test.ts\"",
     "test:e2e": "node --test \"tests/**/*.e2e.ts\"",
     "test:journeys": "node --test \"tests/journeys/**/*.journey.ts\"",
     "replica:up": "docker compose up --detach --wait",

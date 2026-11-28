@@ -68,9 +68,9 @@ function ciJobs(): Obj {
   return wf["jobs"] as Obj;
 }
 
-/** True when a `run:` line runs the overlay-render test: `npm test` or the file by name. */
+/** True when a `run:` line runs the overlay-render test: `npm test` (not another script such as test:unit) or the file by name. */
 function runsOverlayRender(run: string): boolean {
-  return /\bnpm (run )?test\b/.test(run) || run.includes("test/estate/overlay-render.test.ts");
+  return /\bnpm (run )?test(?![\w:-])/.test(run) || run.includes("test/estate/overlay-render.test.ts");
 }
 
 // Step conditions the harness treats as true; any other `if:` may not run on
