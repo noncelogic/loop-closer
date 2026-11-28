@@ -3,7 +3,8 @@
 // (LC-EST-PUBLISH-BOUNDED-WAIT; policy main-stays-green: a main-only step
 // tolerates the external delays it depends on with a bounded wait).
 //
-//   node estate-registry-retry.mjs pull <ref>   # node base from the estate ACR cache
+//   node estate-registry-retry.mjs pull <ref>   # node base from the estate ACR cache; ci's `test` job
+//                                               # also pulls tests/deploy/candidate-node-base.ref with it
 //   node estate-registry-retry.mjs push <ref>   # the built image; writes digest=<sha256:...> to $GITHUB_OUTPUT
 //
 // Runs `docker pull|push <ref>` (already logged in by

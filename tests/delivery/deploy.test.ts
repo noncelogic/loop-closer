@@ -233,6 +233,71 @@ test("a candidate whose Postgres never comes up, or whose API is not published o
   }
 });
 
+test("a cancelled deploy stops: no docker command after the abort, its Postgres wait and health probe end, and it rejects", { timeout: 10_000 }, async () => {
+  const keysRoot = mkdtempSync(join(tmpdir(), "lc-deploy-test-"));
+  try {
+    /** Rejects once `signal` aborts, as a real wait or request does; never resolves on its own. */
+    const untilAborted = (signal: AbortSignal | null | undefined, what: string): Promise<never> =>
+      new Promise((_, reject) => {
+        if (!signal) return; // a wait or probe that cannot be cancelled hangs, and the test times out
+        if (signal.aborted) return reject(new Error(`${what} aborted`));
+        signal.addEventListener("abort", () => reject(new Error(`${what} aborted`)), { once: true });
+      });
+
+    // Cancelled while it waits for Postgres: the wait ends and no further docker command runs.
+    const waiting = new AbortController();
+    const pgCalls: string[][] = [];
+    let atAbort = -1;
+    const none = async (u: string | URL): Promise<Response> => {
+      throw new Error(`unexpected request ${String(u)}`);
+    };
+    await assert.rejects(
+      deployCandidate({
+        image: IMAGE, name: NAME, docker: fakeDocker(pgCalls, { pgReadyAfter: 99 }), fetch: none, keysRoot, attempts: 90,
+        sleep: (_ms, signal) => {
+          atAbort = pgCalls.length;
+          waiting.abort(new Error("test cancelled"));
+          return untilAborted(signal, "sleep");
+        },
+        signal: waiting.signal,
+      }),
+      /the deploy of lc-candidate-42-1 was cancelled: test cancelled/,
+    );
+    assert.equal(pgCalls.length, atAbort, "a docker command ran after the deploy was cancelled");
+
+    // Cancelled while a /healthz probe is in flight: the probe ends and the deploy does not fetch the API's log.
+    const probing = new AbortController();
+    const calls: string[][] = [];
+    const seen: string[] = [];
+    await assert.rejects(
+      deployCandidate({
+        image: IMAGE, name: NAME, docker: fakeDocker(calls), sleep: noSleep, keysRoot, attempts: 90,
+        fetch: (u, init) => {
+          seen.push(String(u));
+          if (String(u) !== "http://127.0.0.1:49153/healthz") throw new Error(`unexpected request ${String(u)}`);
+          atAbort = calls.length;
+          probing.abort(new Error("test cancelled"));
+          return untilAborted(init?.signal, "probe");
+        },
+        signal: probing.signal,
+      }),
+      /was cancelled: test cancelled/,
+    );
+    assert.deepEqual(seen, ["http://127.0.0.1:49153/healthz"]);
+    assert.equal(calls.length, atAbort, "a docker command ran after the deploy was cancelled");
+
+    // Cancelled before it starts: nothing is created.
+    const early: string[][] = [];
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: fakeDocker(early), fetch: none, sleep: noSleep, keysRoot, signal: AbortSignal.abort(new Error("gone")) }),
+      /was cancelled: gone/,
+    );
+    assert.deepEqual(early, []);
+  } finally {
+    rmSync(keysRoot, { recursive: true, force: true });
+  }
+});
+
 test("the candidate follows the manifests: a Deployment env the candidate cannot supply is refused, a new literal env is passed", async () => {
   const root = mkdtempSync(join(tmpdir(), "lc-deploy-root-"));
   try {

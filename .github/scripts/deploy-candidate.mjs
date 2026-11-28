@@ -31,6 +31,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse } from "yaml";
@@ -39,6 +40,8 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", 
 const NAME = /^lc-candidate-[a-z0-9][a-z0-9_.-]*$/;
 const OWNER = "joe";
 const HEALTH_TIMEOUT_MS = 5_000;
+/** Longest one docker command may run (a first pull of the Postgres image included); then it is killed and fails. */
+export const DOCKER_TIMEOUT_MS = 180_000;
 /** The Postgres image's bootstrap superuser, as CloudNativePG's; only the bootstrap connects as it, over the socket. */
 const SUPERUSER = "postgres";
 
@@ -72,13 +75,17 @@ function redact(text, secrets = []) {
     .replace(/(PASSWORD=)(?!\*\*\*(?:\s|$))\S+/gi, `$1${MASK}`);
 }
 
-/** Runs docker; returns stdout, throws on a non-zero exit unless `check` is false, with its credentials masked. */
+/**
+ * Runs docker, killed after DOCKER_TIMEOUT_MS; returns stdout, throws on a non-zero exit or the timeout unless
+ * `check` is false, with its credentials masked.
+ */
 function realDocker(args, { check = true } = {}) {
   try {
-    return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: DOCKER_TIMEOUT_MS, killSignal: "SIGKILL" });
   } catch (err) {
     if (!check) return "";
-    throw new Error(redact(`docker ${args.join(" ")} failed: ${String(err.stderr ?? err.message).trim()}`));
+    const why = err.code === "ETIMEDOUT" ? `did not finish within ${DOCKER_TIMEOUT_MS} ms` : String(err.stderr || err.message).trim();
+    throw new Error(redact(`docker ${args.join(" ")} failed: ${why}`));
   }
 }
 
@@ -164,12 +171,13 @@ function principals(scopesDir) {
   return [OWNER, ...names.filter((n) => n !== OWNER).sort()];
 }
 
-const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const defaultSleep = (ms, signal) => delay(ms, undefined, { signal });
 const defaultRandom = () => randomBytes(24).toString("hex");
 
 /**
  * Deploys IMAGE as candidate NAME: its own network and Postgres, the migrations, then the API.
- * Resolves with the API's URL and the directory holding each principal's key.
+ * Resolves with the API's URL and the directory holding each principal's key. Once `signal` aborts, the deploy
+ * runs no further docker command, ends its wait or health probe and rejects; the caller then removes the candidate.
  */
 export async function deployCandidate({
   image,
@@ -182,6 +190,7 @@ export async function deployCandidate({
   root = REPO_ROOT,
   attempts = 60,
   intervalMs = 2_000,
+  signal,
 }) {
   if (!image) throw new Error("no candidate image");
   if (!NAME.test(String(name ?? ""))) throw new Error(`candidate name ${JSON.stringify(name)} is not lc-candidate-<id>`);
@@ -191,8 +200,25 @@ export async function deployCandidate({
   const password = random();
   const superPassword = random();
   const databaseUrl = `postgres://${shape.db.owner}:${password}@${db}:5432/${shape.db.database}`;
+  const cancelled = () => {
+    if (signal?.aborted) throw new Error(`the deploy of ${name} was cancelled: ${signal.reason?.message ?? signal.reason}`);
+  };
+  // Every docker command, wait and probe first checks the signal, so a cancelled deploy stops at its next step.
+  const guardedDocker = (args, opts) => {
+    cancelled();
+    return docker(args, opts);
+  };
+  const guardedSleep = async (ms) => {
+    cancelled();
+    try {
+      await sleep(ms, signal);
+    } catch (err) {
+      cancelled();
+      throw err;
+    }
+  };
   try {
-    return await deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl });
+    return await deploy({ image, name, docker: guardedDocker, fetch, sleep: guardedSleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl, signal, cancelled });
   } catch (err) {
     // Whatever docker or a log echoed, the candidate's database credentials never leave in an error.
     throw new Error(redact(err?.message ?? err, [password, superPassword, databaseUrl]));
@@ -205,7 +231,7 @@ function psqlAsSuperuser(docker, db, shape, database, statements) {
   docker(["exec", db, "psql", "-v", "ON_ERROR_STOP=1", "-U", shape.db.superuser, "-d", database, ...statements.flatMap((s) => ["-c", s])]);
 }
 
-async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl }) {
+async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl, signal, cancelled }) {
 
   // Fresh keys, one per principal, readable by the API's user once copied in.
   const keysDir = mkdtempSync(join(keysRoot, "lc-candidate-keys-"));
@@ -218,11 +244,12 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
     shape.db.image]);
   docker(["start", db]);
   // -h 127.0.0.1: the initdb-phase server listens only on its socket (compose.yaml healthcheck).
-  await until(attempts, intervalMs, sleep, `Postgres of ${name} is not ready`, async () => {
+  await until(attempts, intervalMs, sleep, cancelled, `Postgres of ${name} is not ready`, async () => {
     try {
       docker(["exec", db, "pg_isready", "-h", "127.0.0.1", "-U", shape.db.superuser, "-d", shape.db.superuser]);
       return true;
     } catch {
+      cancelled();
       return false;
     }
   });
@@ -261,23 +288,28 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
   }
   const url = `http://127.0.0.1:${hostPort}`;
   try {
-    await until(attempts, intervalMs, sleep, `the API of ${name} never answered /healthz`, async () => {
+    await until(attempts, intervalMs, sleep, cancelled, `the API of ${name} never answered /healthz`, async () => {
       try {
-        const res = await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+        const probe = AbortSignal.timeout(HEALTH_TIMEOUT_MS);
+        const res = await fetch(`${url}/healthz`, { signal: signal ? AbortSignal.any([probe, signal]) : probe });
         return res.ok && (await res.json())?.status === "ok";
       } catch {
+        cancelled();
         return false;
       }
     });
   } catch (err) {
+    cancelled();
     throw new Error(`${err.message}; its log:\n${docker(["logs", `${name}-api`], { check: false })}`);
   }
   return { url, keysDir, principals: who };
 }
 
-async function until(attempts, intervalMs, sleep, failure, ready) {
+async function until(attempts, intervalMs, sleep, cancelled, failure, ready) {
   for (let i = 0; i < attempts; i++) {
+    cancelled();
     if (await ready()) return;
+    cancelled();
     if (i < attempts - 1) await sleep(intervalMs);
   }
   throw new Error(`${failure} after ${attempts} attempts`);
