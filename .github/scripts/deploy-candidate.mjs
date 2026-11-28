@@ -27,7 +27,7 @@
 //   node deploy-candidate.mjs down NAME       remove everything `up` created
 // NAME is lc-candidate-<id>; containers, volumes and the network carry it.
 // Checked by tests/delivery/deploy.test.ts.
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,24 +74,30 @@ function redact(text, secrets = []) {
 }
 
 /**
- * The docker CLI as a Docker: returns stdout, throws on a non-zero exit unless `check` is false, with its
- * credentials masked. A command runs as long as it takes (the workflow's timeout-minutes bounds the deploy), unless
- * the caller gives `timeoutMs`: then it is killed after that long and fails naming the bound.
+ * The docker CLI (`bin`, docker on PATH by default) as a Docker: resolves with stdout once the command has exited,
+ * rejects on a non-zero exit unless `check` is false, with its credentials masked. It never blocks the event loop.
+ * A command runs as long as it takes unless the caller gives `timeoutMs`, or a `signal` that aborts: then the
+ * command is killed, and the promise rejects only once it has exited, naming the bound or the cancellation, even
+ * when `check` is false.
  */
-export function dockerCli({ timeoutMs } = {}) {
-  return (args, { check = true } = {}) => {
-    try {
-      return execFileSync("docker", args, {
+export function dockerCli({ timeoutMs, bin = "docker" } = {}) {
+  return (args, { check = true, signal } = {}) =>
+    new Promise((resolvePromise, reject) => {
+      execFile(bin, args, {
         encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" }),
+        maxBuffer: 64 * 1024 * 1024,
+        killSignal: "SIGKILL",
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
+        ...(signal ? { signal } : {}),
+      }, (err, stdout, stderr) => {
+        if (!err) return resolvePromise(stdout);
+        const line = `docker ${args.join(" ")}`;
+        if (signal?.aborted) return reject(new Error(redact(`${line} was cancelled: ${signal.reason?.message ?? signal.reason}`)));
+        if (err.killed && timeoutMs !== undefined) return reject(new Error(redact(`${line} failed: did not finish within ${timeoutMs} ms`)));
+        if (!check) return resolvePromise("");
+        reject(new Error(redact(`${line} failed: ${String(stderr || err.message).trim()}`)));
       });
-    } catch (err) {
-      if (!check) return "";
-      const why = err.code === "ETIMEDOUT" ? `did not finish within ${timeoutMs} ms` : String(err.stderr || err.message).trim();
-      throw new Error(redact(`docker ${args.join(" ")} failed: ${why}`));
-    }
-  };
+    });
 }
 
 const realDocker = dockerCli();
@@ -190,8 +196,9 @@ const defaultRandom = () => randomBytes(24).toString("hex");
 
 /**
  * Deploys IMAGE as candidate NAME: its own network and Postgres, the migrations, then the API.
- * Resolves with the API's URL and the directory holding each principal's key. Once `signal` aborts, the deploy
- * runs no further docker command, ends its wait or health probe and rejects; the caller then removes the candidate.
+ * Resolves with the API's URL and the directory holding each principal's key. Once `signal` aborts, or
+ * `deadlineMs` (a bound on the whole deploy) has passed, the deploy kills the docker command in flight, runs no
+ * further one, ends its wait or health probe and rejects; the caller then removes the candidate.
  */
 export async function deployCandidate({
   image,
@@ -204,7 +211,8 @@ export async function deployCandidate({
   root = REPO_ROOT,
   attempts = 60,
   intervalMs = 2_000,
-  signal,
+  signal: callerSignal,
+  deadlineMs,
 }) {
   if (!image) throw new Error("no candidate image");
   if (!NAME.test(String(name ?? ""))) throw new Error(`candidate name ${JSON.stringify(name)} is not lc-candidate-<id>`);
@@ -214,13 +222,27 @@ export async function deployCandidate({
   const password = random();
   const superPassword = random();
   const databaseUrl = `postgres://${shape.db.owner}:${password}@${db}:5432/${shape.db.database}`;
+  // The deploy's own signal: the caller's, or the deadline's once it passes, whichever comes first.
+  const stop = new AbortController();
+  const onAbort = () => stop.abort(callerSignal.reason);
+  if (callerSignal?.aborted) onAbort();
+  else callerSignal?.addEventListener("abort", onAbort, { once: true });
+  const deadline = deadlineMs === undefined ? undefined
+    : setTimeout(() => stop.abort(new Error(`its deadline of ${deadlineMs} ms passed`)), deadlineMs);
+  const signal = stop.signal;
   const cancelled = () => {
-    if (signal?.aborted) throw new Error(`the deploy of ${name} was cancelled: ${signal.reason?.message ?? signal.reason}`);
+    if (signal.aborted) throw new Error(`the deploy of ${name} was cancelled: ${signal.reason?.message ?? signal.reason}`);
   };
-  // Every docker command, wait and probe first checks the signal, so a cancelled deploy stops at its next step.
-  const guardedDocker = (args, opts) => {
+  // Every docker command, wait and probe first checks the signal and is given it, so a cancelled deploy kills the
+  // command in flight and stops there.
+  const guardedDocker = async (args, opts) => {
     cancelled();
-    return docker(args, opts);
+    try {
+      return await docker(args, { ...opts, signal });
+    } catch (err) {
+      cancelled();
+      throw err;
+    }
   };
   const guardedSleep = async (ms) => {
     cancelled();
@@ -236,13 +258,16 @@ export async function deployCandidate({
   } catch (err) {
     // Whatever docker or a log echoed, the candidate's database credentials never leave in an error.
     throw new Error(redact(err?.message ?? err, [password, superPassword, databaseUrl]));
+  } finally {
+    clearTimeout(deadline);
+    callerSignal?.removeEventListener("abort", onAbort);
   }
 }
 
 /** psql as the bootstrap superuser over the container's socket, one statement per -c, stopping at the first error. */
-function psqlAsSuperuser(docker, db, shape, database, statements) {
+async function psqlAsSuperuser(docker, db, shape, database, statements) {
   if (statements.length === 0) return;
-  docker(["exec", db, "psql", "-v", "ON_ERROR_STOP=1", "-U", shape.db.superuser, "-d", database, ...statements.flatMap((s) => ["-c", s])]);
+  await docker(["exec", db, "psql", "-v", "ON_ERROR_STOP=1", "-U", shape.db.superuser, "-d", database, ...statements.flatMap((s) => ["-c", s])]);
 }
 
 async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, attempts, intervalMs, shape, db, password, superPassword, databaseUrl, signal, cancelled }) {
@@ -252,15 +277,15 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
   const who = principals(shape.scopesDir);
   for (const p of who) writeFileSync(join(keysDir, p), `${random()}\n`, { mode: 0o644 });
 
-  docker(["network", "create", name]);
-  docker(["create", "--name", db, "--network", name,
+  await docker(["network", "create", name]);
+  await docker(["create", "--name", db, "--network", name,
     "--env", `POSTGRES_USER=${shape.db.superuser}`, "--env", `POSTGRES_PASSWORD=${superPassword}`, "--env", `POSTGRES_DB=${shape.db.superuser}`,
     shape.db.image]);
-  docker(["start", db]);
+  await docker(["start", db]);
   // -h 127.0.0.1: the initdb-phase server listens only on its socket (compose.yaml healthcheck).
   await until(attempts, intervalMs, sleep, cancelled, `Postgres of ${name} is not ready`, async () => {
     try {
-      docker(["exec", db, "pg_isready", "-h", "127.0.0.1", "-U", shape.db.superuser, "-d", shape.db.superuser]);
+      await docker(["exec", db, "pg_isready", "-h", "127.0.0.1", "-U", shape.db.superuser, "-d", shape.db.superuser]);
       return true;
     } catch {
       cancelled();
@@ -269,33 +294,33 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
   });
   // database.yaml's initdb: the owner role and its database, then postInitSQL (in postgres) and
   // postInitApplicationSQL (in the application database), each run once by the superuser.
-  psqlAsSuperuser(docker, db, shape, shape.db.superuser, [
+  await psqlAsSuperuser(docker, db, shape, shape.db.superuser, [
     `CREATE ROLE ${ident(shape.db.owner)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ${literal(password)}`,
     `CREATE DATABASE ${ident(shape.db.database)} OWNER ${ident(shape.db.owner)}`,
     ...shape.db.postInitSQL,
   ]);
-  psqlAsSuperuser(docker, db, shape, shape.db.database, shape.db.postInitApplicationSQL);
+  await psqlAsSuperuser(docker, db, shape, shape.db.database, shape.db.postInitApplicationSQL);
 
   // The keys and scopes, in volumes the API mounts read-only (a read-only root cannot be copied into).
-  docker(["volume", "create", `${name}-keys`]);
-  docker(["volume", "create", `${name}-scopes`]);
-  docker(["create", "--name", `${name}-config`, "--volume", `${name}-keys:/keys`, "--volume", `${name}-scopes:/scopes`, image]);
-  docker(["cp", `${keysDir}/.`, `${name}-config:/keys/`]);
-  docker(["cp", `${shape.scopesDir}/.`, `${name}-config:/scopes/`]);
-  docker(["rm", `${name}-config`]);
+  await docker(["volume", "create", `${name}-keys`]);
+  await docker(["volume", "create", `${name}-scopes`]);
+  await docker(["create", "--name", `${name}-config`, "--volume", `${name}-keys:/keys`, "--volume", `${name}-scopes:/scopes`, image]);
+  await docker(["cp", `${keysDir}/.`, `${name}-config:/keys/`]);
+  await docker(["cp", `${shape.scopesDir}/.`, `${name}-config:/scopes/`]);
+  await docker(["rm", `${name}-config`]);
 
   const [migrateEntry, ...migrateArgs] = shape.migrate.command;
-  docker(["run", "--rm", "--name", `${name}-migrate`, "--network", name, ...shape.migrate.opts,
+  await docker(["run", "--rm", "--name", `${name}-migrate`, "--network", name, ...shape.migrate.opts,
     "--env", `DATABASE_URL=${databaseUrl}`, "--entrypoint", migrateEntry, image, ...migrateArgs]);
 
   const [apiEntry, ...apiArgs] = shape.api.command;
   const env = { ...shape.api.env, DATABASE_URL: databaseUrl };
-  docker(["run", "--detach", "--name", `${name}-api`, "--network", name, ...shape.api.opts,
+  await docker(["run", "--detach", "--name", `${name}-api`, "--network", name, ...shape.api.opts,
     ...Object.entries(env).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
     "--volume", `${name}-keys:${shape.api.keysPath}:ro`, "--volume", `${name}-scopes:${shape.api.scopesPath}:ro`,
     "--publish", `127.0.0.1::${shape.api.port}`, "--entrypoint", apiEntry, image, ...apiArgs]);
 
-  const published = docker(["port", `${name}-api`, `${shape.api.port}/tcp`]).trim().split("\n")[0] ?? "";
+  const published = (await docker(["port", `${name}-api`, `${shape.api.port}/tcp`])).trim().split("\n")[0] ?? "";
   const hostPort = Number(published.slice(published.lastIndexOf(":") + 1));
   if (!published.startsWith("127.0.0.1:") || !Number.isInteger(hostPort) || hostPort <= 0) {
     throw new Error(`the API of ${name} is not published on 127.0.0.1: ${JSON.stringify(published)}`);
@@ -314,7 +339,7 @@ async function deploy({ image, name, docker, fetch, sleep, random, keysRoot, att
     });
   } catch (err) {
     cancelled();
-    throw new Error(`${err.message}; its log:\n${docker(["logs", `${name}-api`], { check: false })}`);
+    throw new Error(`${err.message}; its log:\n${await docker(["logs", `${name}-api`], { check: false })}`);
   }
   return { url, keysDir, principals: who };
 }
@@ -329,12 +354,48 @@ async function until(attempts, intervalMs, sleep, cancelled, failure, ready) {
   throw new Error(`${failure} after ${attempts} attempts`);
 }
 
-/** Removes everything deployCandidate created for NAME; what is already gone is skipped. */
-export function removeCandidate({ name, docker = realDocker }) {
+/** The containers, volumes and network deployCandidate creates for NAME. */
+function resourcesOf(name) {
+  return {
+    containers: [`${name}-api`, `${name}-migrate`, `${name}-config`, `${name}-db`],
+    volumes: [`${name}-keys`, `${name}-scopes`],
+    networks: [name],
+  };
+}
+
+/** Which of NAME's containers, volumes and network docker still lists. */
+export async function candidateLeftovers({ name, docker = realDocker }) {
+  const mine = resourcesOf(name);
+  // docker's name filter matches substrings, so only NAME's own resources are kept.
+  const listed = async (kind, args, names) => {
+    const out = await docker([...args, "--filter", `name=${name}`]);
+    return out.split("\n").map((l) => l.trim()).filter((l) => names.includes(l)).map((l) => `${kind} ${l}`);
+  };
+  return [
+    ...(await listed("container", ["ps", "--all", "--format", "{{.Names}}"], mine.containers)),
+    ...(await listed("volume", ["volume", "ls", "--format", "{{.Name}}"], mine.volumes)),
+    ...(await listed("network", ["network", "ls", "--format", "{{.Name}}"], mine.networks)),
+  ];
+}
+
+/**
+ * Removes everything deployCandidate created for NAME; what is already gone is skipped. Then reads back that none
+ * of it is left: an operation the daemon was still finishing for a killed command (a container created after the
+ * deploy stopped) is removed on the next round, and removal fails naming what is left after `attempts` rounds.
+ */
+export async function removeCandidate({ name, docker = realDocker, sleep = defaultSleep, attempts = 5, intervalMs = 1_000 }) {
   if (!NAME.test(String(name ?? ""))) throw new Error(`candidate name ${JSON.stringify(name)} is not lc-candidate-<id>`);
-  docker(["rm", "--force", "--volumes", `${name}-api`, `${name}-migrate`, `${name}-config`, `${name}-db`], { check: false });
-  docker(["volume", "rm", "--force", `${name}-keys`, `${name}-scopes`], { check: false });
-  docker(["network", "rm", name], { check: false });
+  const mine = resourcesOf(name);
+  let left = [];
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(intervalMs);
+    await docker(["rm", "--force", "--volumes", ...mine.containers], { check: false });
+    await docker(["volume", "rm", "--force", ...mine.volumes], { check: false });
+    await docker(["network", "rm", ...mine.networks], { check: false });
+    left = await candidateLeftovers({ name, docker });
+    if (left.length === 0) return;
+  }
+  throw new Error(`candidate ${name} still has ${left.join(", ")} after ${attempts} removals`);
 }
 
 async function main([cmd, ...args]) {
@@ -346,7 +407,7 @@ async function main([cmd, ...args]) {
     return;
   }
   if (cmd === "down" && args.length === 1) {
-    removeCandidate({ name: args[0] });
+    await removeCandidate({ name: args[0] });
     console.log(`candidate ${args[0]} removed`);
     return;
   }

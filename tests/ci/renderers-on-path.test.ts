@@ -150,6 +150,12 @@ function runJobSetupPath(job: Obj, dir: string): TestProcess | undefined {
       `src="${assets}/\${url##*/}"\n[ -f "$src" ] || { echo "curl stub: no asset for $url" >&2; exit 22; }\n` +
       `if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi\n`,
   );
+  // docker: the job's only docker step provisions a digest-pinned base; any other call fails as unexpected.
+  executable(
+    join(stubs, "docker"),
+    `#!/usr/bin/env bash\nif [ "$1" = pull ] && [[ "$2" =~ @sha256:[0-9a-f]{64}$ ]]; then echo "pulled $2"; exit 0; fi\n` +
+      `echo "docker stub: unexpected call: $*" >&2\nexit 99\n`,
+  );
   // npm: setup commands succeed; `npm test` starts the test process.
   const probe = join(dir, "test-process.mjs");
   const probeOut = join(dir, "test-process.json");

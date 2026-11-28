@@ -15,12 +15,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, cpSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, matchesGlob } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { parse, stringify } from "yaml";
-import { CANDIDATE_INPUTS, deployCandidate, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
-import { pathToFileURL } from "node:url";
+import { CANDIDATE_INPUTS, deployCandidate, dockerCli, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
 import { repoRoot, runCommands, testSelection, words } from "./selection.ts";
 
 type Obj = Record<string, any>;
@@ -103,14 +103,19 @@ const SUPER_PW = "superpw1";
 const DB_URL = `postgres://loopcloser:${PW}@${NAME}-db:5432/loopcloser`;
 
 /**
- * A fake docker that answers only the calls a candidate deploy makes and throws on any other.
- * `pgReadyAfter` failed readiness probes come first; `healthyAfter` failed /healthz answers likewise.
+ * A fake docker that answers only the calls a candidate deploy and its removal make and throws on any other.
+ * `pgReadyAfter` failed readiness probes come first. Listings answer with `listed(kind)` (nothing by default): the
+ * container, volume and network names docker would still show.
  */
-function fakeDocker(calls: string[][], opts: { pgReadyAfter?: number; port?: string } = {}): Docker {
+function fakeDocker(
+  calls: string[][],
+  opts: { pgReadyAfter?: number; port?: string; listed?: (kind: "ps" | "volume" | "network") => string[] } = {},
+): Docker {
   let probes = 0;
-  return (args, o) => {
+  return async (args, o) => {
     calls.push(o?.check === false ? [...args, "#nocheck"] : args);
     const [cmd, sub] = args;
+    const listing = (kind: "ps" | "volume" | "network"): string => `${(opts.listed?.(kind) ?? []).map((n) => `${n}\n`).join("")}`;
     if (cmd === "exec" && args.includes("pg_isready")) {
       if (probes++ < (opts.pgReadyAfter ?? 0)) throw new Error("no response");
       return "127.0.0.1:5432 - accepting connections\n";
@@ -118,12 +123,29 @@ function fakeDocker(calls: string[][], opts: { pgReadyAfter?: number; port?: str
     if (cmd === "exec" && args[2] === "psql" && args.includes("ON_ERROR_STOP=1")) return "";
     if (cmd === "port") return `${opts.port ?? "127.0.0.1:49153"}\n`;
     if (cmd === "logs") return "api log line\n";
+    if (cmd === "ps" && args.join(" ") === `ps --all --format {{.Names}} --filter name=${filteredName(args)}`) return listing("ps");
+    if ((cmd === "volume" || cmd === "network") && sub === "ls" && args.join(" ") === `${cmd} ls --format {{.Name}} --filter name=${filteredName(args)}`) return listing(cmd);
     if (cmd === "network" && (sub === "create" || sub === "rm")) return "";
     if (cmd === "volume" && (sub === "create" || sub === "rm")) return "";
     if (["create", "cp", "start", "run", "rm"].includes(cmd!)) return "";
     throw new Error(`unexpected docker call: ${args.join(" ")}`);
   };
 }
+
+/** The candidate a listing filters on: the value of its trailing `--filter name=<candidate>`. */
+function filteredName(args: string[]): string {
+  const filter = args.at(-1) ?? "";
+  assert.equal(args.at(-2), "--filter", `a listing without a name filter: ${args.join(" ")}`);
+  assert.match(filter, /^name=lc-candidate-/, `a listing filtered on something other than a candidate: ${filter}`);
+  return filter.slice("name=".length);
+}
+
+/** The listing calls removeCandidate reads back after removing NAME. */
+const listings = (name: string): string[][] => [
+  ["ps", "--all", "--format", "{{.Names}}", "--filter", `name=${name}`],
+  ["volume", "ls", "--format", "{{.Name}}", "--filter", `name=${name}`],
+  ["network", "ls", "--format", "{{.Name}}", "--filter", `name=${name}`],
+];
 
 /** A fake API that answers only the candidate's /healthz, failing `failures` times first. */
 function fakeApi(url: string, seen: string[], failures = 0) {
@@ -245,10 +267,23 @@ test("a cancelled deploy stops: no docker command after the abort, its Postgres 
         signal.addEventListener("abort", () => reject(new Error(`${what} aborted`)), { once: true });
       });
 
-    // Cancelled while it waits for Postgres: the wait ends and no further docker command runs.
+    /**
+     * Aborts `caller` with `reason` and reports what the deploy's wait or probe signal shows at that same moment,
+     * synchronously, before any timer (the probe's own five-second timeout included) could have run: the reason
+     * it was aborted with, or undefined if the caller's abort did not reach it.
+     */
+    const abortAndObserve = (caller: AbortController, reason: Error, signal: AbortSignal | null | undefined): unknown => {
+      assert.ok(signal && !signal.aborted, "the wait or probe started without a live signal");
+      caller.abort(reason);
+      return signal.aborted ? signal.reason : undefined;
+    };
+
+    // Cancelled while it waits for Postgres: the caller's abort ends the wait and no further docker command runs.
     const waiting = new AbortController();
+    const waitReason = new Error("test cancelled");
     const pgCalls: string[][] = [];
     let atAbort = -1;
+    let sleepSaw: unknown = "the wait never ran";
     const none = async (u: string | URL): Promise<Response> => {
       throw new Error(`unexpected request ${String(u)}`);
     };
@@ -257,19 +292,23 @@ test("a cancelled deploy stops: no docker command after the abort, its Postgres 
         image: IMAGE, name: NAME, docker: fakeDocker(pgCalls, { pgReadyAfter: 99 }), fetch: none, keysRoot, attempts: 90,
         sleep: (_ms, signal) => {
           atAbort = pgCalls.length;
-          waiting.abort(new Error("test cancelled"));
+          sleepSaw = abortAndObserve(waiting, waitReason, signal);
           return untilAborted(signal, "sleep");
         },
         signal: waiting.signal,
       }),
       /the deploy of lc-candidate-42-1 was cancelled: test cancelled/,
     );
+    assert.equal(sleepSaw, waitReason, "the caller's abort did not reach the Postgres wait's signal");
     assert.equal(pgCalls.length, atAbort, "a docker command ran after the deploy was cancelled");
 
-    // Cancelled while a /healthz probe is in flight: the probe ends and the deploy does not fetch the API's log.
+    // Cancelled while a /healthz probe is in flight: the caller's abort, not the probe's timeout, aborts the probe's
+    // signal the moment it happens; the probe ends and the deploy does not fetch the API's log.
     const probing = new AbortController();
+    const probeReason = new Error("test cancelled");
     const calls: string[][] = [];
     const seen: string[] = [];
+    let probeSaw: unknown = "the probe never ran";
     await assert.rejects(
       deployCandidate({
         image: IMAGE, name: NAME, docker: fakeDocker(calls), sleep: noSleep, keysRoot, attempts: 90,
@@ -277,13 +316,14 @@ test("a cancelled deploy stops: no docker command after the abort, its Postgres 
           seen.push(String(u));
           if (String(u) !== "http://127.0.0.1:49153/healthz") throw new Error(`unexpected request ${String(u)}`);
           atAbort = calls.length;
-          probing.abort(new Error("test cancelled"));
+          probeSaw = abortAndObserve(probing, probeReason, init?.signal);
           return untilAborted(init?.signal, "probe");
         },
         signal: probing.signal,
       }),
       /was cancelled: test cancelled/,
     );
+    assert.equal(probeSaw, probeReason, "the caller's abort did not reach the health probe's signal");
     assert.deepEqual(seen, ["http://127.0.0.1:49153/healthz"]);
     assert.equal(calls.length, atAbort, "a docker command ran after the deploy was cancelled");
 
@@ -381,36 +421,120 @@ test("the candidate bootstraps with CloudNativePG's initdb defaults when databas
   }
 });
 
-/** A fake docker executable that answers `run` after $FAKE_DOCKER_SLEEP seconds and fails any other call. */
-const SLOW_DOCKER_BIN = `#!/bin/sh
-if [ "$1" = run ]; then sleep "$FAKE_DOCKER_SLEEP"; echo "ran $2"; exit 0; fi
-echo "unexpected docker call: $*" >&2
-exit 99
-`;
+/**
+ * A fake docker executable that is one process from start to exit: it replaces its shell with `cat` reading the
+ * FIFO `gate`, so it stays blocked until the test releases it (opens the FIFO, writes its output and closes it)
+ * or it is killed. While it is blocked the FIFO has a reader; once it is gone it has none.
+ */
+function blockedDocker(dir: string): { bin: string; gate: string } {
+  const gate = join(dir, "gate");
+  execFileSync("mkfifo", [gate]);
+  const bin = join(dir, "docker");
+  writeFileSync(bin, `#!/bin/sh\nexec cat ${JSON.stringify(gate)}\n`, { mode: 0o755 });
+  return { bin, gate };
+}
 
-test("a docker command runs until it finishes unless its caller bounds it: only a given timeoutMs kills it, named in the failure", () => {
+/** The FIFO open for writing once its reader (the blocked fake) has it open, or undefined while it has none. */
+function writerOf(gate: string): number | undefined {
+  try {
+    return openSync(gate, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENXIO") return undefined;
+    throw err;
+  }
+}
+
+/** Waits, up to `deadlineMs`, until the fake is blocked on its gate; returns the gate's writing end. */
+async function blocked(gate: string, deadlineMs = 10_000): Promise<number> {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    const fd = writerOf(gate);
+    if (fd !== undefined) return fd;
+    assert.ok(Date.now() < until, `the fake docker never blocked on its gate within ${deadlineMs} ms`);
+    await delay(10);
+  }
+}
+
+/** Asserts the fake is gone: its gate has no reader left. */
+function assertGone(gate: string, what: string): void {
+  const fd = writerOf(gate);
+  if (fd !== undefined) closeSync(fd);
+  assert.equal(fd, undefined, `${what}: the fake docker is still running`);
+}
+
+test("a docker command runs until it finishes unless its caller bounds it: only a given timeoutMs kills it, named in the failure", { timeout: 30_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "lc-deploy-timeout-"));
   try {
-    const bin = join(dir, "bin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "docker"), SLOW_DOCKER_BIN, { mode: 0o755 });
-    // The deployer's docker (what `deploy-candidate.mjs up` deploys with) and a caller-bounded one, run against
-    // the same command, which outlasts the caller's bound.
-    const script = join(dir, "probe.mjs");
-    writeFileSync(script, `import { dockerCli } from ${JSON.stringify(pathToFileURL(join(repoRoot, ".github", "scripts", "deploy-candidate.mjs")).href)};
-const out = { unbounded: dockerCli()(["run", "migrate"]) };
-try { out.bounded = dockerCli({ timeoutMs: 300 })(["run", "migrate"]); } catch (err) { out.bounded = err.message; }
-console.log(JSON.stringify(out));
-`);
-    const res = spawnSync(process.execPath, [script], {
-      encoding: "utf8",
-      env: { PATH: `${bin}:${process.env["PATH"]}`, FAKE_DOCKER_SLEEP: "2" },
-      timeout: 30_000,
+    // The deployer's docker (what `deploy-candidate.mjs up` deploys with) runs a command until it exits: blocked,
+    // the fake is released and its output returned.
+    const unboundedDir = join(dir, "unbounded");
+    mkdirSync(unboundedDir);
+    const unbounded = blockedDocker(unboundedDir);
+    const running = dockerCli({ bin: unbounded.bin })(["run", "migrate"]);
+    const fd = await blocked(unbounded.gate);
+    writeSync(fd, "ran migrate\n");
+    closeSync(fd);
+    assert.equal(await running, "ran migrate\n", "the deployer's docker cut a command short");
+
+    // A caller-bounded docker kills the command, never released, once its bound passes, and rejects only after
+    // the command has exited.
+    const boundedDir = join(dir, "bounded");
+    mkdirSync(boundedDir);
+    const bounded = blockedDocker(boundedDir);
+    await assert.rejects(dockerCli({ bin: bounded.bin, timeoutMs: 300 })(["run", "migrate"]), (err: Error) => {
+      assert.equal(err.message, "docker run migrate failed: did not finish within 300 ms");
+      return true;
     });
-    assert.equal(res.status, 0, `${res.stdout}${res.stderr}`);
-    const out = JSON.parse(res.stdout) as { unbounded: string; bounded: string };
-    assert.equal(out.unbounded, "ran migrate\n", "the deployer's docker cut a command short");
-    assert.equal(out.bounded, "docker run migrate failed: did not finish within 300 ms");
+    assertGone(bounded.gate, "after its timeout");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a docker command is killed once its signal aborts, and rejects naming the cancellation only after it has exited", { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lc-deploy-cancel-"));
+  try {
+    const fake = blockedDocker(dir);
+    const caller = new AbortController();
+    // check: false tolerates a failed command, never a cancelled one.
+    const running = dockerCli({ bin: fake.bin })(["rm", "--force", "x"], { check: false, signal: caller.signal });
+    closeSync(await blocked(fake.gate));
+    caller.abort(new Error("test cancelled"));
+    await assert.rejects(running, /^Error: docker rm --force x was cancelled: test cancelled$/);
+    assertGone(fake.gate, "after its cancellation");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a deploy cancelled, or past its deadline, while a docker command runs kills that command and rejects at once", { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "lc-deploy-inflight-"));
+  try {
+    const none = async (u: string | URL): Promise<Response> => {
+      throw new Error(`unexpected request ${String(u)}`);
+    };
+    // The deploy's first docker command (network create) blocks; the caller cancels while it runs.
+    const cancelDir = join(dir, "cancel");
+    mkdirSync(cancelDir);
+    const cancelFake = blockedDocker(cancelDir);
+    const caller = new AbortController();
+    const cancelled = deployCandidate({
+      image: IMAGE, name: NAME, docker: dockerCli({ bin: cancelFake.bin }), fetch: none, sleep: noSleep, keysRoot: cancelDir, signal: caller.signal,
+    });
+    closeSync(await blocked(cancelFake.gate));
+    caller.abort(new Error("test cancelled"));
+    await assert.rejects(cancelled, /^Error: the deploy of lc-candidate-42-1 was cancelled: test cancelled$/);
+    assertGone(cancelFake.gate, "after the deploy was cancelled");
+
+    // Nobody cancels: the deploy's own deadline ends the command it is blocked on.
+    const deadlineDir = join(dir, "deadline");
+    mkdirSync(deadlineDir);
+    const deadlineFake = blockedDocker(deadlineDir);
+    await assert.rejects(
+      deployCandidate({ image: IMAGE, name: NAME, docker: dockerCli({ bin: deadlineFake.bin }), fetch: none, sleep: noSleep, keysRoot: deadlineDir, deadlineMs: 300 }),
+      /^Error: the deploy of lc-candidate-42-1 was cancelled: its deadline of 300 ms passed$/,
+    );
+    assertGone(deadlineFake.gate, "after the deploy's deadline");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -446,7 +570,7 @@ function queueFiles(): string[] {
   return [...files].sort();
 }
 
-test("a pull request that changes the deploy queue runs its batch and deploy jobs as a dry run", () => {
+test("a pull request that changes the deploy queue runs its batch and deploy jobs as a dry run", async () => {
   const d = delivery["deploy"] as Obj;
   const path = d["dry_run"]?.["workflow"];
   assert.equal(typeof path, "string", "delivery.yaml deploy.dry_run names no workflow");
@@ -489,8 +613,8 @@ test("a pull request that changes the deploy queue runs its batch and deploy job
   const concrete = name.replace("${{ github.event.pull_request.number }}", "89").replace("${{ github.run_id }}", "123").replace("${{ github.run_attempt }}", "2");
   assert.doesNotMatch(concrete, /^lc-candidate-\d+-\d+$/, "the dry run's candidate has a batch candidate's name");
   const calls: string[][] = [];
-  removeCandidate({ name: concrete, docker: fakeDocker(calls) });
-  assert.deepEqual(calls.at(-1), ["network", "rm", "lc-candidate-pr-89-123-2", "#nocheck"]);
+  await removeCandidate({ name: concrete, docker: fakeDocker(calls) });
+  assert.deepEqual(calls.find((c) => c[0] === "network"), ["network", "rm", "lc-candidate-pr-89-123-2", "#nocheck"]);
 });
 
 test("the dry run's trigger covers every file the candidate is built or migrated from, including db/migrations and package-lock.json", () => {
@@ -509,15 +633,45 @@ test("the dry run's trigger covers every file the candidate is built or migrated
   assert.deepEqual(uncovered(without((p) => p === "package-lock.json")), ["package-lock.json"]);
 });
 
-test("teardown removes the candidate's containers, volumes and network, tolerating what is already gone", () => {
+const removal = [
+  ["rm", "--force", "--volumes", `${NAME}-api`, `${NAME}-migrate`, `${NAME}-config`, `${NAME}-db`, "#nocheck"],
+  ["volume", "rm", "--force", `${NAME}-keys`, `${NAME}-scopes`, "#nocheck"],
+  ["network", "rm", NAME, "#nocheck"],
+];
+
+test("teardown removes the candidate's containers, volumes and network, tolerating what is already gone, then reads back that none is left", async () => {
   const calls: string[][] = [];
-  removeCandidate({ name: NAME, docker: fakeDocker(calls) });
-  assert.deepEqual(calls, [
-    ["rm", "--force", "--volumes", `${NAME}-api`, `${NAME}-migrate`, `${NAME}-config`, `${NAME}-db`, "#nocheck"],
-    ["volume", "rm", "--force", `${NAME}-keys`, `${NAME}-scopes`, "#nocheck"],
-    ["network", "rm", NAME, "#nocheck"],
-  ]);
-  assert.throws(() => removeCandidate({ name: "loopcloser", docker: fakeDocker([]) }), /not lc-candidate-<id>/);
+  // Another candidate whose name extends this one's is listed by docker's substring filter and is not this one's.
+  await removeCandidate({ name: NAME, docker: fakeDocker(calls, { listed: (kind) => [`${NAME}0${kind === "ps" ? "-db" : ""}`] }) });
+  assert.deepEqual(calls, [...removal, ...listings(NAME)]);
+  await assert.rejects(removeCandidate({ name: "loopcloser", docker: fakeDocker([]) }), /not lc-candidate-<id>/);
+});
+
+test("teardown removes again what appears after a removal, as a daemon finishing a killed command's create does, and fails naming what is left", async () => {
+  // A container the daemon was still creating for a killed `docker run` shows up after the first removal.
+  const calls: string[][] = [];
+  const slept: number[] = [];
+  let rounds = 0;
+  await removeCandidate({
+    name: NAME,
+    docker: fakeDocker(calls, { listed: (kind) => (kind === "ps" && rounds++ === 0 ? [`${NAME}-migrate`] : []) }),
+    sleep: async (ms) => void slept.push(ms),
+  });
+  assert.deepEqual(calls, [...removal, ...listings(NAME), ...removal, ...listings(NAME)]);
+  assert.deepEqual(slept, [1_000]);
+
+  // What never goes away fails the teardown, named, after the given number of rounds.
+  const stuck: string[][] = [];
+  await assert.rejects(
+    removeCandidate({
+      name: NAME,
+      docker: fakeDocker(stuck, { listed: (kind) => (kind === "volume" ? [`${NAME}-keys`] : kind === "network" ? [NAME] : []) }),
+      sleep: noSleep,
+      attempts: 3,
+    }),
+    /^Error: candidate lc-candidate-42-1 still has volume lc-candidate-42-1-keys, network lc-candidate-42-1 after 3 removals$/,
+  );
+  assert.equal(stuck.length, 3 * (removal.length + listings(NAME).length));
 });
 
 /**

@@ -25,6 +25,10 @@ jobs:
       KUBECTL_VERSION: v1.34.1
       KUSTOMIZE_VERSION: v5.7.1
       KUBECONFORM_VERSION: v0.8.0
+      # The node base tests/deploy/deploy-candidate.test.ts builds its candidate image on, pinned by digest
+      # (node:24-bookworm-slim) and provisioned in this job's Docker daemon before the tests run, so the test
+      # never resolves or pulls a mutable tag itself (LC-DEPLOY-CANDIDATE-DB-ROLE).
+      CANDIDATE_NODE_BASE: node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,6 +38,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts
+      # Retried on a transient registry failure, like the publish's base pull.
+      - name: Provision the digest-pinned candidate node base
+        run: node .github/scripts/estate-registry-retry.mjs pull "$CANDIDATE_NODE_BASE"
       # tests/deploy/manifests.test.ts and deploy/tests/external-secret.test.ts
       # run here too; same pinned tools as `manifests`.
       - name: Install pinned kubectl, kustomize and kubeconform
