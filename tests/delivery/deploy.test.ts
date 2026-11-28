@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { basename, join, matchesGlob } from "node:path";
 import { parse, stringify } from "yaml";
 import { CANDIDATE_INPUTS, deployCandidate, removeCandidate, type Docker } from "../../.github/scripts/deploy-candidate.mjs";
+import { pathToFileURL } from "node:url";
 import { repoRoot, runCommands, testSelection, words } from "./selection.ts";
 
 type Obj = Record<string, any>;
@@ -320,6 +321,98 @@ test("the candidate follows the manifests: a Deployment env the candidate cannot
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the candidate bootstraps with CloudNativePG's initdb defaults when database.yaml leaves the database or owner unnamed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lc-deploy-root-"));
+  try {
+    for (const p of ["compose.yaml", "deploy"]) cpSync(join(repoRoot, p), join(root, p), { recursive: true });
+    const path = join(root, CANDIDATE_INPUTS.database);
+    const cluster = parse(readFileSync(path, "utf8")) as Obj;
+    /** Deploys with database.yaml's bootstrap set to `bootstrap` (omitted when undefined); returns the docker calls. */
+    const deployWith = async (bootstrap: Obj | undefined): Promise<string[][]> => {
+      const spec = { ...cluster["spec"] };
+      if (bootstrap === undefined) delete spec["bootstrap"];
+      else spec["bootstrap"] = bootstrap;
+      writeFileSync(path, stringify({ ...cluster, spec }));
+      const calls: string[][] = [];
+      let n = 0;
+      await deployCandidate({
+        image: IMAGE, name: NAME, docker: fakeDocker(calls), fetch: fakeApi("http://127.0.0.1:49153", []), sleep: noSleep,
+        random: () => [PW, SUPER_PW][n++] ?? `key${n}`, keysRoot: root, root,
+      });
+      return calls;
+    };
+    const psqlCalls = (calls: string[][]): string[][] => calls.filter((c) => c[0] === "exec" && c[2] === "psql");
+    const migrateUrl = (calls: string[][]): string | undefined =>
+      calls.find((c) => c[0] === "run" && c.includes(`${NAME}-migrate`))?.find((a) => a.startsWith("DATABASE_URL="));
+    const bootstrapOf = (db: string, owner: string, ...post: string[]): string[] => [
+      "exec", `${NAME}-db`, "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres",
+      "-c", `CREATE ROLE "${owner}" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${PW}'`,
+      "-c", `CREATE DATABASE "${db}" OWNER "${owner}"`, ...post.flatMap((q) => ["-c", q]),
+    ];
+
+    // initdb with neither name: the database is `app`, owned by `app`.
+    const postInit = cluster["spec"]["bootstrap"]["initdb"]["postInitSQL"] as string[];
+    let calls = await deployWith({ initdb: { postInitSQL: postInit } });
+    assert.deepEqual(psqlCalls(calls), [bootstrapOf("app", "app", ...postInit)]);
+    assert.equal(migrateUrl(calls), `DATABASE_URL=postgres://app:${PW}@${NAME}-db:5432/app`);
+
+    // A database without an owner: the owner is the database's name.
+    calls = await deployWith({ initdb: { database: "records" } });
+    assert.deepEqual(psqlCalls(calls), [bootstrapOf("records", "records")]);
+    assert.equal(migrateUrl(calls), `DATABASE_URL=postgres://records:${PW}@${NAME}-db:5432/records`);
+
+    // An owner without a database: the database is `app`, owned by that owner.
+    calls = await deployWith({ initdb: { owner: "keeper" } });
+    assert.deepEqual(psqlCalls(calls), [bootstrapOf("app", "keeper")]);
+    assert.equal(migrateUrl(calls), `DATABASE_URL=postgres://keeper:${PW}@${NAME}-db:5432/app`);
+
+    // No bootstrap section: CloudNativePG bootstraps with initdb and its defaults.
+    calls = await deployWith(undefined);
+    assert.deepEqual(psqlCalls(calls), [bootstrapOf("app", "app")]);
+
+    // A bootstrap the candidate cannot reproduce, or the superuser as owner, is refused before anything runs.
+    await assert.rejects(deployWith({ recovery: { source: "elsewhere" } }), /bootstraps by recovery, not initdb/);
+    await assert.rejects(deployWith({ initdb: { owner: "postgres" } }), /initdb owner is the postgres superuser/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A fake docker executable that answers `run` after $FAKE_DOCKER_SLEEP seconds and fails any other call. */
+const SLOW_DOCKER_BIN = `#!/bin/sh
+if [ "$1" = run ]; then sleep "$FAKE_DOCKER_SLEEP"; echo "ran $2"; exit 0; fi
+echo "unexpected docker call: $*" >&2
+exit 99
+`;
+
+test("a docker command runs until it finishes unless its caller bounds it: only a given timeoutMs kills it, named in the failure", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lc-deploy-timeout-"));
+  try {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), SLOW_DOCKER_BIN, { mode: 0o755 });
+    // The deployer's docker (what `deploy-candidate.mjs up` deploys with) and a caller-bounded one, run against
+    // the same command, which outlasts the caller's bound.
+    const script = join(dir, "probe.mjs");
+    writeFileSync(script, `import { dockerCli } from ${JSON.stringify(pathToFileURL(join(repoRoot, ".github", "scripts", "deploy-candidate.mjs")).href)};
+const out = { unbounded: dockerCli()(["run", "migrate"]) };
+try { out.bounded = dockerCli({ timeoutMs: 300 })(["run", "migrate"]); } catch (err) { out.bounded = err.message; }
+console.log(JSON.stringify(out));
+`);
+    const res = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: { PATH: `${bin}:${process.env["PATH"]}`, FAKE_DOCKER_SLEEP: "2" },
+      timeout: 30_000,
+    });
+    assert.equal(res.status, 0, `${res.stdout}${res.stderr}`);
+    const out = JSON.parse(res.stdout) as { unbounded: string; bounded: string };
+    assert.equal(out.unbounded, "ran migrate\n", "the deployer's docker cut a command short");
+    assert.equal(out.bounded, "docker run migrate failed: did not finish within 300 ms");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

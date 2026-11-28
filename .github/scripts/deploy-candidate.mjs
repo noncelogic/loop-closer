@@ -40,8 +40,6 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", 
 const NAME = /^lc-candidate-[a-z0-9][a-z0-9_.-]*$/;
 const OWNER = "joe";
 const HEALTH_TIMEOUT_MS = 5_000;
-/** Longest one docker command may run (a first pull of the Postgres image included); then it is killed and fails. */
-export const DOCKER_TIMEOUT_MS = 180_000;
 /** The Postgres image's bootstrap superuser, as CloudNativePG's; only the bootstrap connects as it, over the socket. */
 const SUPERUSER = "postgres";
 
@@ -76,18 +74,27 @@ function redact(text, secrets = []) {
 }
 
 /**
- * Runs docker, killed after DOCKER_TIMEOUT_MS; returns stdout, throws on a non-zero exit or the timeout unless
- * `check` is false, with its credentials masked.
+ * The docker CLI as a Docker: returns stdout, throws on a non-zero exit unless `check` is false, with its
+ * credentials masked. A command runs as long as it takes (the workflow's timeout-minutes bounds the deploy), unless
+ * the caller gives `timeoutMs`: then it is killed after that long and fails naming the bound.
  */
-function realDocker(args, { check = true } = {}) {
-  try {
-    return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: DOCKER_TIMEOUT_MS, killSignal: "SIGKILL" });
-  } catch (err) {
-    if (!check) return "";
-    const why = err.code === "ETIMEDOUT" ? `did not finish within ${DOCKER_TIMEOUT_MS} ms` : String(err.stderr || err.message).trim();
-    throw new Error(redact(`docker ${args.join(" ")} failed: ${why}`));
-  }
+export function dockerCli({ timeoutMs } = {}) {
+  return (args, { check = true } = {}) => {
+    try {
+      return execFileSync("docker", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" }),
+      });
+    } catch (err) {
+      if (!check) return "";
+      const why = err.code === "ETIMEDOUT" ? `did not finish within ${timeoutMs} ms` : String(err.stderr || err.message).trim();
+      throw new Error(redact(`docker ${args.join(" ")} failed: ${why}`));
+    }
+  };
 }
+
+const realDocker = dockerCli();
 
 function yamlAt(root, path) {
   return parse(readFileSync(join(root, path), "utf8"));
@@ -129,9 +136,16 @@ export function candidateShape(root = REPO_ROOT) {
   const compose = yamlAt(root, CANDIDATE_INPUTS.compose).services.postgres;
   const deployment = yamlAt(root, CANDIDATE_INPUTS.deployment);
   const job = yamlAt(root, CANDIDATE_INPUTS.schemaJob);
-  const initdb = yamlAt(root, CANDIDATE_INPUTS.database)?.spec?.bootstrap?.initdb ?? {};
-  for (const k of ["database", "owner"]) if (typeof initdb[k] !== "string" || !initdb[k]) throw new Error(`database.yaml names no initdb ${k}`);
-  if (initdb.owner === SUPERUSER) throw new Error(`database.yaml's initdb owner is the ${SUPERUSER} superuser`);
+  // CloudNativePG bootstraps with initdb when the Cluster names no bootstrap method; initdb's database defaults
+  // to `app` and its owner to the database's name (BootstrapInitDB, cloudnative-pg.v1).
+  const bootstrap = yamlAt(root, CANDIDATE_INPUTS.database)?.spec?.bootstrap ?? {};
+  const methods = Object.keys(bootstrap).filter((k) => k !== "initdb");
+  if (!bootstrap.initdb && methods.length > 0) throw new Error(`database.yaml bootstraps by ${methods.join(", ")}, not initdb`);
+  const initdb = bootstrap.initdb ?? {};
+  const database = initdb.database ?? "app";
+  const owner = initdb.owner ?? database;
+  for (const [k, v] of [["database", database], ["owner", owner]]) if (typeof v !== "string" || !v) throw new Error(`database.yaml's initdb ${k} is not a name`);
+  if (owner === SUPERUSER) throw new Error(`database.yaml's initdb owner is the ${SUPERUSER} superuser`);
   const sqlList = (k) => {
     const v = initdb[k] ?? [];
     if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new Error(`database.yaml initdb ${k} is not a list of statements`);
@@ -154,8 +168,8 @@ export function candidateShape(root = REPO_ROOT) {
     db: {
       image: compose.image,
       superuser: SUPERUSER,
-      owner: initdb.owner,
-      database: initdb.database,
+      owner,
+      database,
       postInitSQL: sqlList("postInitSQL"),
       postInitApplicationSQL: sqlList("postInitApplicationSQL"),
     },

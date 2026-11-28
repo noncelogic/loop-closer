@@ -40,14 +40,6 @@ jobs:
         run: bash .github/scripts/install-k8s-tools.sh
       - run: npm run typecheck
       - run: npm run build
-      # tests/deploy/deploy-candidate.test.ts builds its candidate image on the
-      # Dockerfile's node base pinned by digest in
-      # tests/deploy/candidate-node-base.ref and never pulls it: this step puts
-      # exactly that image in the job's docker daemon, with the bounded wait on
-      # transient registry errors (estate-registry-retry.mjs), so the build
-      # depends on no runner cache and no mutable tag.
-      - name: Provision the digest-pinned node base for the candidate deploy test
-        run: node .github/scripts/estate-registry-retry.mjs pull "$(cat tests/deploy/candidate-node-base.ref)"
       # The per-pull-request suite (*.test.ts). The end-to-end suites (*.e2e.ts)
       # are not in it: they run once per batch in deploy.yml (COND-344,
       # delivery.yaml; Rule: policies/placement-defaults.yaml#gates).

@@ -7,43 +7,41 @@
 //
 // These run the real deployer against real docker: its own Postgres, the real
 // migrate and API entrypoints, and the API reached over its published loopback
-// port. The candidate image holds what the Dockerfile's image holds (this
-// checkout's compiled dist, its node_modules, contracts and db/migrations), built
-// on the host from the Dockerfile's node base pinned by digest in
-// candidate-node-base.ref. ci's `test` job provisions that base before the suite
-// runs; this file never pulls it, so the build needs no registry and no cache it
-// did not put there. Requires Docker, like tests/schema.
+// port. The candidate image is the one CI's image build makes: this checkout's
+// Dockerfile, built from the repository root on the base that Dockerfile
+// selects, as ci.yml's `image` job and the deploy queue's candidate build do.
+// Requires Docker, like tests/schema.
 //
 // Each deploy runs through withCandidate: it gets the test's cancellation
-// signal, and its candidate is removed only after the deploy has stopped; the
-// suite's teardown waits for every deploy and its removal before removing the
-// images they run.
+// signal and a docker whose every command is bounded (the deployer's own docker
+// is not: the workflow bounds it), and its candidate is removed only after the
+// deploy has stopped; the suite's teardown waits for every deploy and its
+// removal before removing the images they run.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parse } from "yaml";
-import { REPO_ROOT, deployCandidate, removeCandidate, type DeployCandidateInput } from "../../.github/scripts/deploy-candidate.mjs";
-import { buildEntrypoints, type EntrypointBuild } from "../support/entrypoint-build.ts";
+import { REPO_ROOT, deployCandidate, dockerCli, removeCandidate, type DeployCandidateInput } from "../../.github/scripts/deploy-candidate.mjs";
 
 const run = `${process.pid}-${randomBytes(3).toString("hex")}`;
 const IMAGE = `loopcloser:candidate-dbrole-${run}`;
 const SUPERUSER_IMAGE = `loopcloser:candidate-dbrole-su-${run}`;
-/** The pinned node base, tagged under a run-local name so the build resolves it from the daemon and nowhere else. */
-const BASE_IMAGE = `loopcloser:candidate-dbrole-base-${run}`;
-const NODE_BASE = readFileSync(join(import.meta.dirname, "candidate-node-base.ref"), "utf8").trim();
-const initdb = (parse(readFileSync(join(REPO_ROOT, "deploy", "base", "database.yaml"), "utf8")) as any).spec.bootstrap.initdb;
-const OWNER: string = initdb.owner;
-const DATABASE: string = initdb.database;
+// database.yaml's initdb names, with CloudNativePG's defaults for a name it leaves out: database `app`, owned by
+// a role named as the database.
+const initdb = (parse(readFileSync(join(REPO_ROOT, "deploy", "base", "database.yaml"), "utf8")) as any).spec?.bootstrap?.initdb ?? {};
+const DATABASE: string = initdb.database ?? "app";
+const OWNER: string = initdb.owner ?? DATABASE;
 const TEST_TIMEOUT_MS = 300_000;
+/** The bound on each docker command the tests' deploys and removals run, so a hung one cannot outlive its test. */
+const boundedDocker = dockerCli({ timeoutMs: 180_000 });
 
 let scratch = "";
-let build: EntrypointBuild | undefined;
 /** Every candidate's deploy-and-removal, each settled only once its candidate is gone. */
 const lifecycles = new Set<Promise<void>>();
 
@@ -78,14 +76,14 @@ async function withCandidate<T>(
   input: Pick<DeployCandidateInput, "image" | "name">,
   use: (deploying: ReturnType<typeof deployCandidate>) => Promise<T>,
 ): Promise<T> {
-  const deploying = deployCandidate({ ...input, keysRoot: scratch, intervalMs: 1_000, attempts: 90, signal: t.signal });
+  const deploying = deployCandidate({ ...input, docker: boundedDocker, keysRoot: scratch, intervalMs: 1_000, attempts: 90, signal: t.signal });
   const stopped = deploying.then(() => undefined, () => undefined);
   const life = (async () => {
     try {
       return await use(deploying);
     } finally {
       await stopped;
-      removeCandidate({ name: input.name });
+      removeCandidate({ name: input.name, docker: boundedDocker });
     }
   })();
   lifecycles.add(life.then(() => undefined, () => undefined));
@@ -131,25 +129,8 @@ async function lockLoops(name: string, signal: AbortSignal): Promise<{ pid: numb
 
 before(async () => {
   scratch = mkdtempSync(join(tmpdir(), "lc-candidate-dbrole-"));
-  const app = join(scratch, "image");
-  build = await buildEntrypoints("candidate-dbrole");
-  cpSync(build.outDir, join(app, "dist"), { recursive: true });
-  for (const p of ["package.json", "contracts", "db/migrations", "node_modules"]) cpSync(join(REPO_ROOT, p), join(app, p), { recursive: true });
-  // The Dockerfile's base, pinned by digest: the pin must be of the tag the Dockerfile names, and must already be
-  // in the daemon (ci's `test` job provisions it), so the build reaches no registry.
-  const base = /^ARG NODE_IMAGE=(\S+)$/m.exec(readFileSync(join(REPO_ROOT, "Dockerfile"), "utf8"))?.[1];
-  assert.ok(base, "the Dockerfile names no NODE_IMAGE");
-  assert.ok(NODE_BASE.startsWith(`${base}@sha256:`) && /@sha256:[0-9a-f]{64}$/.test(NODE_BASE), `candidate-node-base.ref (${NODE_BASE}) is not ${base} pinned by digest`);
-  try {
-    docker(["image", "inspect", "--format", "{{.Id}}", NODE_BASE]);
-  } catch {
-    assert.fail(`the node base ${NODE_BASE} is not in the docker daemon; provision it first: docker pull ${NODE_BASE}`);
-  }
-  docker(["tag", NODE_BASE, BASE_IMAGE]);
-  // The Dockerfile's runtime image: its base, workdir and user; CMD is unused, the deployer names each entrypoint.
-  // The private build's directory is mkdtemp's 0700, so the image makes the app readable to its user.
-  writeFileSync(join(app, "Dockerfile"), `FROM ${BASE_IMAGE}\nENV NODE_ENV=production\nWORKDIR /app\nCOPY . .\nRUN chmod -R a+rX /app\nUSER node\n`);
-  docker(["build", "--quiet", "--tag", IMAGE, app], 600_000);
+  // The service image, built as CI builds it: the repository's Dockerfile on the base it selects.
+  docker(["build", "--quiet", "--tag", IMAGE, "--file", join(REPO_ROOT, "Dockerfile"), REPO_ROOT], 600_000);
   // The same image with one more migration, which only a superuser may apply.
   const ctx = join(scratch, "superuser-image");
   mkdirSync(ctx);
@@ -161,8 +142,7 @@ before(async () => {
 after(async () => {
   // A deploy still running (its test timed out) owns its containers until it stops and is removed.
   await Promise.all(lifecycles);
-  execFileSync("docker", ["image", "rm", "--force", IMAGE, SUPERUSER_IMAGE, BASE_IMAGE], { stdio: "ignore", timeout: 120_000 });
-  build?.remove();
+  execFileSync("docker", ["image", "rm", "--force", IMAGE, SUPERUSER_IMAGE], { stdio: "ignore", timeout: 120_000 });
   if (scratch) rmSync(scratch, { recursive: true, force: true });
 });
 

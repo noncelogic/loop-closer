@@ -1,7 +1,8 @@
 // Types for deploy-candidate.mjs, imported by tests/delivery/deploy.test.ts.
 export type Docker = (args: string[], opts?: { check?: boolean }) => string;
 export declare const REPO_ROOT: string;
-export declare const DOCKER_TIMEOUT_MS: number;
+/** The docker CLI; a command is killed after `timeoutMs` only when the caller gives one. */
+export declare function dockerCli(opts?: { timeoutMs?: number }): Docker;
 export declare const CANDIDATE_INPUTS: Readonly<Record<"compose" | "deployment" | "schemaJob" | "scopes" | "database", string>>;
 export interface DeployCandidateInput {
   image: string;
