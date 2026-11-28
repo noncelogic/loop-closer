@@ -11,14 +11,18 @@
 // (this checkout's compiled dist, its contracts and migrations, and its
 // dependencies) on the Dockerfile's node base pinned by digest: ci.yml's `test`
 // job names that base (CANDIDATE_NODE_BASE) and provisions it in its Docker
-// daemon before the suite runs, and the build uses the dependencies the job has
-// already installed, so building reaches no registry and runs no `npm ci`.
+// daemon before the suite runs. The image is committed onto the base's local
+// image ID with the dependencies the job has already installed
+// (tests/support/candidate-image.ts), so making it reaches no registry and runs
+// no `npm ci`. Teardown joins that setup before removing what it uses.
 // Requires Docker, like tests/schema.
 //
 // Each deploy runs through withCandidate: it gets the test's cancellation
 // signal and a deadline for the whole deploy, and its docker commands run
-// asynchronously, each killed once the deploy is cancelled. The candidate is
-// removed only after the deploy has stopped, and the fixture settles only once
+// asynchronously: once the deploy is cancelled a wait in flight is killed and a
+// daemon change in flight completes, so the deploy settles only once the daemon
+// has done all it was asked. The candidate is removed only after the deploy has
+// settled, and the fixture settles only once
 // docker lists none of the candidate's containers, volumes or network; the
 // suite's teardown waits for every deploy and its removal before removing the
 // images they run.
@@ -32,12 +36,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parse } from "yaml";
+import { commitImage, localImageId } from "../support/candidate-image.ts";
 import { buildEntrypoints } from "../support/entrypoint-build.ts";
 import { REPO_ROOT, candidateLeftovers, deployCandidate, dockerCli, removeCandidate, type DeployCandidateInput } from "../../.github/scripts/deploy-candidate.mjs";
 
 const run = `${process.pid}-${randomBytes(3).toString("hex")}`;
 const IMAGE = `loopcloser:candidate-dbrole-${run}`;
 const SUPERUSER_IMAGE = `loopcloser:candidate-dbrole-su-${run}`;
+/** The containers the images are committed from, removed once each is committed. */
+const IMAGE_CONTAINER = `lc-candidate-dbrole-image-${run}`;
 // database.yaml's initdb names, with CloudNativePG's defaults for a name it leaves out: database `app`, owned by
 // a role named as the database.
 const initdb = (parse(readFileSync(join(REPO_ROOT, "deploy", "base", "database.yaml"), "utf8")) as any).spec?.bootstrap?.initdb ?? {};
@@ -48,6 +55,13 @@ const TEST_TIMEOUT_MS = 300_000;
 const DEPLOY_DEADLINE_MS = 200_000;
 /** The bound on each docker command a removal or a check runs, so a hung one cannot outlive its test. */
 const boundedDocker = dockerCli({ timeoutMs: 60_000 });
+/**
+ * Setup's deadline, after which it starts no further command. Each image command is bounded by 90 s, so setup
+ * settles within the deadline plus one command and its container's removal, inside the hook's timeout.
+ */
+const SETUP_DEADLINE_MS = 600_000;
+const SETUP_TIMEOUT_MS = 900_000;
+const imageDocker = dockerCli({ timeoutMs: 90_000 });
 
 /** The digest-pinned node base ci.yml's `test` job provisions for these tests. */
 const ciTest = (parse(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as any).jobs.test;
@@ -83,7 +97,7 @@ async function waitFor<T>(what: string, deadlineMs: number, signal: AbortSignal,
 /**
  * Deploys a candidate with the test's cancellation signal and a deadline for the whole deploy, and hands `use` the
  * deploy in flight. Whatever `use` does, and even after the test timed out, the candidate is removed only once the
- * deploy has stopped (its docker commands killed and exited), and the fixture settles only once docker lists
+ * deploy has settled (its waits killed and exited, its daemon changes completed), and the fixture settles only once docker lists
  * nothing of the candidate.
  */
 async function withCandidate<T>(
@@ -145,15 +159,20 @@ async function lockLoops(name: string, signal: AbortSignal): Promise<{ pid: numb
   }
 }
 
-before(async () => {
-  scratch = mkdtempSync(join(tmpdir(), "lc-candidate-dbrole-"));
-  // The base is the Dockerfile's node base pinned by digest, already in the daemon: nothing is resolved or pulled.
+/**
+ * Makes the two images the tests deploy, from local inputs only (tests/support/candidate-image.ts): the base is
+ * resolved in this daemon to its image ID, and nothing is built or pulled. Each read is killed once `signal`
+ * aborts and no further command starts; a daemon change in flight completes, so teardown, which waits for this,
+ * finds everything it made.
+ */
+async function makeImages(signal: AbortSignal): Promise<void> {
+  // The base is the Dockerfile's node base pinned by digest, already in the daemon (ci.yml's test job pulls it).
   assert.match(NODE_BASE, /^node:24-bookworm-slim@sha256:[0-9a-f]{64}$/, "ci.yml's test job names no digest-pinned CANDIDATE_NODE_BASE");
-  await docker(["image", "inspect", "--format", "{{.Id}}", NODE_BASE], undefined, 30_000).catch((err: Error) => {
+  const baseId = await localImageId(imageDocker, NODE_BASE, signal).catch((err: Error) => {
     throw new Error(`the candidate node base is not provisioned in this Docker daemon (ci.yml's test job pulls it): ${err.message}`);
   });
   // The service image: the Dockerfile's runtime stage contents (dist compiled from this checkout, contracts,
-  // migrations and the installed dependencies) on that base, as its runtime user, with no `npm ci`.
+  // migrations and the installed dependencies) on that base, configured as its runtime stage, with no `npm ci`.
   const app = join(scratch, "app-image");
   mkdirSync(app);
   // The production build, into an output directory of its own (tests/support/entrypoint-build.ts), never dist/.
@@ -168,22 +187,38 @@ before(async () => {
   for (const p of ["package.json", "package-lock.json", "node_modules", "contracts", join("db", "migrations")]) {
     cpSync(join(REPO_ROOT, p), join(app, p), { recursive: true, verbatimSymlinks: true });
   }
-  writeFileSync(join(app, "Dockerfile"), `FROM ${NODE_BASE}\nENV NODE_ENV=production\nWORKDIR /app\nCOPY . .\nUSER node\nEXPOSE 8080\nCMD ["node", "dist/main.js"]\n`);
-  await docker(["build", "--quiet", "--tag", IMAGE, app], undefined, 600_000);
+  const imageId = await commitImage({
+    docker: imageDocker, fromId: baseId, context: app, into: "/app", tag: IMAGE, container: `${IMAGE_CONTAINER}-app`, signal,
+    changes: ["ENV NODE_ENV=production", "WORKDIR /app", "USER node", "EXPOSE 8080", 'CMD ["node", "dist/main.js"]'],
+  });
   // The same image with one more migration, which only a superuser may apply.
   const ctx = join(scratch, "superuser-image");
   mkdirSync(ctx);
   writeFileSync(join(ctx, "9999_needs_superuser.sql"), "SET session_replication_role = replica;\n");
-  writeFileSync(join(ctx, "Dockerfile"), `FROM ${IMAGE}\nCOPY 9999_needs_superuser.sql /app/db/migrations/\n`);
-  await docker(["build", "--quiet", "--tag", SUPERUSER_IMAGE, ctx], undefined, 300_000);
-}, { timeout: 900_000 });
+  await commitImage({
+    docker: imageDocker, fromId: imageId, context: ctx, into: "/app/db/migrations", tag: SUPERUSER_IMAGE, container: `${IMAGE_CONTAINER}-su`, signal,
+  });
+}
+
+/** The images' making, joined by teardown before it removes what the making uses or made. */
+let making: Promise<void> | undefined;
+
+before(async (t) => {
+  scratch = mkdtempSync(join(tmpdir(), "lc-candidate-dbrole-"));
+  // Setup stops at its own deadline, inside the hook's timeout, or once the run is cancelled.
+  making = makeImages(AbortSignal.any([t.signal, AbortSignal.timeout(SETUP_DEADLINE_MS)]));
+  await making;
+}, { timeout: SETUP_TIMEOUT_MS });
 
 after(async () => {
+  // Setup still running (its hook timed out) owns the scratch directory and the images until it has stopped.
+  await making?.catch(() => undefined);
   // A deploy still running (its test timed out) owns its containers until it stops and is removed.
   await Promise.all(lifecycles);
+  await docker(["rm", "--force", `${IMAGE_CONTAINER}-app`, `${IMAGE_CONTAINER}-su`], undefined, 60_000).catch(() => undefined);
   await docker(["image", "rm", "--force", IMAGE, SUPERUSER_IMAGE], undefined, 120_000);
   if (scratch) rmSync(scratch, { recursive: true, force: true });
-});
+}, { timeout: SETUP_TIMEOUT_MS });
 
 test("candidate migrations and the API connect as the estate database owner role, which is not a superuser", { timeout: TEST_TIMEOUT_MS }, async (t) => {
   const name = `lc-candidate-dbrole-${run}`;
@@ -230,7 +265,7 @@ test("a migration that needs superuser privileges fails the candidate deploy", {
   const name = `lc-candidate-dbrole-su-${run}`;
   await withCandidate(t, { image: SUPERUSER_IMAGE, name }, async (deploying) => {
     await assert.rejects(deploying, (err: Error) => {
-      assert.match(err.message, /^docker run --rm --name lc-candidate-dbrole-su-\S+-migrate /);
+      assert.match(err.message, /^docker start --attach lc-candidate-dbrole-su-\S+-migrate /);
       assert.match(err.message, /9999_needs_superuser\.sql/);
       assert.match(err.message, /permission denied to set parameter "session_replication_role"/);
       return true;

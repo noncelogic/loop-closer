@@ -4,7 +4,10 @@
 // base in its Docker daemon before the suite runs. This runs the job's steps
 // before `npm test` the way the runner does, with a docker that records what it
 // is asked to do, and checks the pinned base is pulled there and nothing else
-// reaches docker. Nothing here reaches a registry.
+// reaches docker. It also checks the suite makes its image from that base's
+// local image ID (tests/support/candidate-image.ts), never by a build or a pull
+// that could resolve the base through the registry. Nothing here reaches a
+// registry.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -12,6 +15,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { parse } from "yaml";
+import type { Docker } from "../../.github/scripts/deploy-candidate.mjs";
+import { commitImage, localImageId } from "../support/candidate-image.ts";
 
 const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
 type Obj = Record<string, any>;
@@ -56,4 +61,79 @@ test("ci's test job pulls the digest-pinned candidate node base into its Docker 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const BASE = "node:24-bookworm-slim@sha256:" + "a".repeat(64);
+const BASE_ID = "sha256:" + "b".repeat(64);
+const IMAGE_ID = "sha256:" + "c".repeat(64);
+
+/**
+ * A daemon that holds BASE as BASE_ID and answers only the commands that make an image from a local image ID; a
+ * build, a pull, or a create from anything but that ID fails. Each call is logged with `#nocheck` when it tolerates
+ * failure and `#signal` when it can be cancelled. `onCall` runs as each command arrives.
+ */
+function localDaemon(calls: string[][], onCall: (args: string[]) => void = () => {}): Docker {
+  const tags = new Map<string, string>([[BASE, BASE_ID]]);
+  return async (args, o) => {
+    calls.push([...args, ...(o?.check === false ? ["#nocheck"] : []), ...(o?.signal ? ["#signal"] : [])]);
+    onCall(args);
+    const line = args.join(" ");
+    if (line.startsWith("image inspect --format {{.Id}} ") && args.length === 5) {
+      const id = tags.get(args[4]!);
+      if (!id) throw new Error(`Error: No such image: ${args[4]}`);
+      return `${id}\n`;
+    }
+    if (line === `create --name made ${BASE_ID}`) return "made-id\n";
+    if (line === "cp /ctx/. made:/app") return "";
+    if (args[0] === "commit" && args.at(-2) === "made") {
+      tags.set(args.at(-1)!, IMAGE_ID);
+      return `${IMAGE_ID}\n`;
+    }
+    if (line === "rm --force made") return "";
+    throw new Error(`unexpected docker call: ${line}`);
+  };
+}
+
+test("the suite's candidate image is committed onto the base's local image ID, never built or pulled", async () => {
+  const calls: string[][] = [];
+  const docker = localDaemon(calls);
+  const baseId = await localImageId(docker, BASE);
+  assert.equal(baseId, BASE_ID);
+  const made = await commitImage({ docker, fromId: baseId, context: "/ctx", into: "/app", tag: "loopcloser:t", container: "made", changes: ["USER node", "WORKDIR /app"] });
+  assert.equal(made, IMAGE_ID);
+  assert.deepEqual(calls, [
+    ["image", "inspect", "--format", "{{.Id}}", BASE],
+    ["create", "--name", "made", BASE_ID],
+    ["cp", "/ctx/.", "made:/app"],
+    ["commit", "--change", "USER node", "--change", "WORKDIR /app", "made", "loopcloser:t"],
+    ["rm", "--force", "made", "#nocheck"],
+    ["image", "inspect", "--format", "{{.Id}}", "loopcloser:t"],
+  ]);
+
+  // A base the daemon does not hold is refused, and a reference is never used where a local image ID is needed.
+  await assert.rejects(localImageId(localDaemon([]), "node:24-bookworm-slim"), /node:24-bookworm-slim is not in this Docker daemon: Error: No such image/);
+  await assert.rejects(commitImage({ docker: localDaemon([]), fromId: BASE, context: "/ctx", into: "/app", tag: "t", container: "made" }), /is not a local image ID/);
+});
+
+test("making the image cancelled mid-way lets the daemon change in flight complete, starts nothing more and still removes its container", async () => {
+  const calls: string[][] = [];
+  const setup = new AbortController();
+  // The setup is cancelled while the daemon copies the context in.
+  const docker = localDaemon(calls, (args) => {
+    if (args[0] === "cp") setup.abort(new Error("setup timed out"));
+  });
+  await assert.rejects(
+    commitImage({ docker, fromId: BASE_ID, context: "/ctx", into: "/app", tag: "loopcloser:t", container: "made", signal: setup.signal }),
+    /setup timed out/,
+  );
+  assert.deepEqual(calls, [
+    ["create", "--name", "made", BASE_ID],
+    ["cp", "/ctx/.", "made:/app"],
+    ["rm", "--force", "made", "#nocheck"],
+  ]);
+  // A read is given the signal, and does not start once it has aborted.
+  const reads: string[][] = [];
+  assert.equal(await localImageId(localDaemon(reads), BASE, new AbortController().signal), BASE_ID);
+  assert.deepEqual(reads, [["image", "inspect", "--format", "{{.Id}}", BASE, "#signal"]]);
+  await assert.rejects(localImageId(localDaemon([]), BASE, setup.signal), /setup timed out/);
 });
